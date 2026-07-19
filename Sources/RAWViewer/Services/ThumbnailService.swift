@@ -146,7 +146,8 @@ final class ThumbnailService: @unchecked Sendable {
         )
         let image: NSImage? = await withCheckedContinuation { continuation in
             generator.generateBestRepresentation(for: request) { representation, _ in
-                if let image = representation?.nsImage {
+                if let image = representation?.nsImage,
+                   Self.isLargeEnough(image, for: url, requestedPixelSize: bucket) {
                     continuation.resume(returning: image)
                 } else {
                     continuation.resume(returning: Self.imageIOThumbnail(url: url, maxPixelSize: bucket))
@@ -193,7 +194,7 @@ final class ThumbnailService: @unchecked Sendable {
             kCGImageSourceShouldCache: false
         ] as CFDictionary) else { return nil }
         let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
             kCGImageSourceShouldCacheImmediately: true
@@ -202,8 +203,27 @@ final class ThumbnailService: @unchecked Sendable {
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 
+    private static func isLargeEnough(_ image: NSImage, for url: URL, requestedPixelSize: Int) -> Bool {
+        let renderedLongestEdge = image.representations.reduce(0) { partial, representation in
+            max(partial, max(representation.pixelsWide, representation.pixelsHigh))
+        }
+        guard renderedLongestEdge > 0,
+              let source = CGImageSourceCreateWithURL(url as CFURL, [
+                kCGImageSourceShouldCache: false
+              ] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return renderedLongestEdge > 0
+        }
+        let sourceWidth = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? requestedPixelSize
+        let sourceHeight = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? requestedPixelSize
+        let expectedLongestEdge = min(requestedPixelSize, max(sourceWidth, sourceHeight))
+        return renderedLongestEdge >= max(1, Int(Double(expectedLongestEdge) * 0.8))
+    }
+
     private func cacheKey(url: URL, modificationDate: Date, bucket: Int) -> String {
-        let source = "v2|\(url.standardizedFileURL.path)|\(modificationDate.timeIntervalSince1970)|\(bucket)"
+        // v3 invalidates thumbnails that may have been generated from tiny
+        // embedded camera previews by earlier versions.
+        let source = "v3|\(url.standardizedFileURL.path)|\(modificationDate.timeIntervalSince1970)|\(bucket)"
         var hash: UInt64 = 14_695_981_039_346_656_037
         for byte in source.utf8 {
             hash ^= UInt64(byte)

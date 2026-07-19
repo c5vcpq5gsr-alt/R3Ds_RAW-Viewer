@@ -169,7 +169,10 @@ struct FullImageService: Sendable {
         let height = (properties?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? maxPixelSize
         let requestedSize = max(1, min(maxPixelSize, max(width, height)))
         let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            // Camera JPEGs and RAW companions often contain only a very small
+            // embedded preview. Always rendering from the primary image avoids
+            // returning that preview in the full-image viewer.
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: requestedSize,
             kCGImageSourceShouldCacheImmediately: true

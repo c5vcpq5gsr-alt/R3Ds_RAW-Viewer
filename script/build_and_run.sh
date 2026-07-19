@@ -19,6 +19,7 @@ APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$PROCESS_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+APP_ICON_SOURCE="$ROOT_DIR/Resources/AppIcon.icns"
 MODULE_CACHE="$ROOT_DIR/.build/module-cache"
 run_swift_build() {
   if [[ -n "${RAW_VIEWER_SWIFT_SCRATCH_PATH:-}" ]]; then
@@ -55,6 +56,11 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+if [[ ! -f "$APP_ICON_SOURCE" ]]; then
+  echo "error: Missing app icon: $APP_ICON_SOURCE" >&2
+  exit 1
+fi
+cp "$APP_ICON_SOURCE" "$APP_RESOURCES/AppIcon.icns"
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -69,14 +75,16 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$PROCESS_NAME</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleName</key>
   <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.5.0</string>
+  <string>0.5.1</string>
   <key>CFBundleVersion</key>
-  <string>8</string>
+  <string>9</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSHighResolutionCapable</key>

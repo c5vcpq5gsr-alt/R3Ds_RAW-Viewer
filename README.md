@@ -34,6 +34,11 @@ Bedarf und entlädt es nach Abschluss wieder, sofern sie es selbst geladen hat. 
 Bildbeschreibung, Modell und Analysezeit werden im SQLite-Index des Cache-Ordners
 gespeichert. Die Originalfotos bleiben unverändert.
 
+Mit **Aktueller Ordner → Schlagwörter für alle Fotos neu erzeugen** lässt sich die
+KI-Analyse für den aktuellen Ordner samt Unterordnern vollständig wiederholen. Erfolgreiche
+Ergebnisse ersetzen die gespeicherten Schlagwörter und Beschreibungen im Cache; XMP-Dateien
+werden erst über die separate XMP-Aktion aktualisiert.
+
 Beim Laden verwendet RAW Viewer automatisch ein auf präzise Fotoanalyse abgestimmtes
 Profil: 16.384 Kontext-Tokens, Temperature 0,1, Top P 0,8, Top K 20, Min P 0,
 Repeat Penalty 1,0 und höchstens 2.048 Ausgabetokens. Samplingwerte werden bei jeder

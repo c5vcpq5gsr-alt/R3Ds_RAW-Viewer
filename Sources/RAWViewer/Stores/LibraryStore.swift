@@ -894,6 +894,12 @@ final class LibraryStore: ObservableObject {
         analyzePhotos(pending)
     }
 
+    func regenerateKeywordsInSelectedFolder() {
+        let assets = photosInSelectedFolderScope
+        guard !assets.isEmpty else { return }
+        analyzePhotos(assets)
+    }
+
     func cancelPhotoAnalysis() {
         analysisTask?.cancel()
     }

@@ -34,7 +34,8 @@ struct PhotoGridView: View {
             if let confirmation = folderActionConfirmation {
                 Button(confirmation.buttonTitle) {
                     switch confirmation {
-                    case .analyze: store.analyzeMissingPhotosInSelectedFolder()
+                    case .analyzeMissing: store.analyzeMissingPhotosInSelectedFolder()
+                    case .regenerateKeywords: store.regenerateKeywordsInSelectedFolder()
                     case .exportXMP: store.exportPendingXMPInSelectedFolder()
                     }
                     folderActionConfirmation = nil
@@ -184,7 +185,7 @@ struct PhotoGridView: View {
         } else {
             Menu {
                 Button {
-                    folderActionConfirmation = .analyze
+                    folderActionConfirmation = .analyzeMissing
                 } label: {
                     Label(
                         "\(store.missingAnalysisCountInSelectedFolder) fehlende Fotos analysieren",
@@ -192,6 +193,15 @@ struct PhotoGridView: View {
                     )
                 }
                 .disabled(store.missingAnalysisCountInSelectedFolder == 0)
+
+                Button {
+                    folderActionConfirmation = .regenerateKeywords
+                } label: {
+                    Label(
+                        "Schlagwörter für alle Fotos neu erzeugen …",
+                        systemImage: "arrow.triangle.2.circlepath"
+                    )
+                }
 
                 Divider()
 
@@ -240,27 +250,32 @@ struct PhotoGridView: View {
 
 @MainActor
 private enum FolderActionConfirmation {
-    case analyze
+    case analyzeMissing
+    case regenerateKeywords
     case exportXMP
 
     var buttonTitle: String {
         switch self {
-        case .analyze: "Analyse starten"
+        case .analyzeMissing: "Analyse starten"
+        case .regenerateKeywords: "Neu erzeugen"
         case .exportXMP: "XMP schreiben"
         }
     }
 
     func title(store: LibraryStore) -> String {
         switch self {
-        case .analyze: "Ordner „\(store.selectedFolderName)“ analysieren?"
+        case .analyzeMissing: "Ordner „\(store.selectedFolderName)“ analysieren?"
+        case .regenerateKeywords: "Alle Schlagwörter in „\(store.selectedFolderName)“ neu erzeugen?"
         case .exportXMP: "XMP-Sidecars in „\(store.selectedFolderName)“ aktualisieren?"
         }
     }
 
     func message(store: LibraryStore) -> String {
         switch self {
-        case .analyze:
+        case .analyzeMissing:
             "\(store.missingAnalysisCountInSelectedFolder) noch nicht analysierte Fotos im Ordner und allen Unterordnern werden nacheinander verarbeitet. Der Vorgang kann abgebrochen und später fortgesetzt werden."
+        case .regenerateKeywords:
+            "Die lokale KI-Analyse für alle \(store.photosInSelectedFolderScope.count) Fotos im Ordner und allen Unterordnern wird erneut ausgeführt. Erfolgreiche Ergebnisse ersetzen die bisher gespeicherten Schlagwörter und Bildbeschreibungen im Cache. Originalfotos und vorhandene XMP-Dateien bleiben unverändert, bis der XMP-Export ausdrücklich gestartet wird."
         case .exportXMP:
             "Die Sidecars von \(store.xmpEligibleAnalysisCountInSelectedFolder) analysierten RAW-Fotos im Ordner und allen Unterordnern werden geprüft. Neue, fehlende oder durch eine erneute Analyse veraltete XMP-Dateien werden neben den Originalen angelegt beziehungsweise sicher ergänzt. Vorhandene Lightroom-Metadaten bleiben erhalten."
         }
