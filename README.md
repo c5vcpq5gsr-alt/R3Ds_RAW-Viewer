@@ -89,3 +89,7 @@ project-specific SDK override. The current verified setup is Xcode 26.6,
 Swift 6.3.3 and the macOS 26.5 SDK.
 
 The generated app bundle is written to `dist/RAW Viewer.app`.
+
+## Lizenz
+
+RAW Viewer wird unter der [MIT-Lizenz](LICENSE) veröffentlicht.
