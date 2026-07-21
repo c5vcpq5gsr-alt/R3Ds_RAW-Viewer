@@ -1,5 +1,8 @@
 import Foundation
+import CoreGraphics
+import ImageIO
 import SQLite3
+import UniformTypeIdentifiers
 
 enum SelfTestRunner {
     private struct CheckFailure: LocalizedError {
@@ -11,19 +14,23 @@ enum SelfTestRunner {
         let checks: [(String, () async throws -> Void)] = [
             ("Dateitypen", checkFileTypes),
             ("Rekursion und RAW-Paarung", checkRecursiveGrouping),
+            ("Warnschwelle für große Fotoordner", checkLargeFolderWarningThreshold),
             ("Versteckte Ordner und Pakete", checkSkippedDirectories),
             ("Stabile IDs", checkStableIDs),
             ("Sortierungen", checkSorting),
+            ("Mehrfachauswahl und Batch-Exportziele", checkMultiSelectionAndBatchDestinations),
+            ("Blocksatz-Layout", checkJustifiedLayout),
             ("Letzter geöffneter Ordner", checkLastSelectedFolder),
             ("Kleine Standardbilder", checkSmallStandardRendering),
             ("Bildmetadaten", checkImageMetadata),
             ("SQLite-Fotoindex", checkPhotoCatalog),
+            ("Drehlogik und Drehkatalog", checkPhotoRotation),
             ("KI-Schlagwortindex", checkPhotoAnalysisCatalog),
             ("Katalogmigration", checkLegacyCatalogMigration),
             ("XMP-Sidecars", checkXMPSidecars),
             ("LM-Studio-Konfiguration", checkLMStudioConfiguration),
             ("Metadaten-Cache", checkMetadataReuse),
-            ("Thumbnail-Größenstufen", checkThumbnailBuckets),
+            ("Einheitlicher 1024er-Thumbnail-Cache", checkThumbnailBuckets),
             ("JPEG-Export", checkJPEGExport),
             ("Scan-Abbruch", checkCancellation),
             ("10.000 Dateieinträge", checkTenThousandFiles)
@@ -90,6 +97,29 @@ enum SelfTestRunner {
         }
     }
 
+    private static func checkLargeFolderWarningThreshold() async throws {
+        try await withTemporaryDirectory { root in
+            let nested = root.appendingPathComponent("Unterordner", isDirectory: true)
+            let hidden = root.appendingPathComponent(".versteckt", isDirectory: true)
+            try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: hidden, withIntermediateDirectories: true)
+
+            touch(root.appendingPathComponent("paar.CR3"))
+            touch(root.appendingPathComponent("paar.jpg"))
+            touch(nested.appendingPathComponent("einzeln.jpg"))
+            touch(nested.appendingPathComponent("einzeln.heic"))
+            touch(nested.appendingPathComponent("grafik.png"))
+            touch(hidden.appendingPathComponent("ignoriert.jpg"))
+
+            let checker = PhotoFolderSizeChecker()
+            let exact = try await checker.check(folderURL: root, limit: 10)
+            try require(exact.photoCount == 4 && !exact.exceedsLimit, "Fotoanzahl berücksichtigt Gruppierung oder Unterordner nicht korrekt")
+
+            let warning = try await checker.check(folderURL: root, limit: 3)
+            try require(warning.exceedsLimit, "Großer Fotoordner überschreitet die Warnschwelle nicht")
+        }
+    }
+
     private static func checkStableIDs() async throws {
         try await withTemporaryDirectory { root in
             touch(root.appendingPathComponent("stable.dng"))
@@ -110,6 +140,73 @@ enum SelfTestRunner {
         try require(PhotoSortOrder.oldestFirst.sort(input).map(\.filename) == ["B.jpg", "A.jpg", "C.jpg"], "Älteste-Sortierung falsch")
         try require(PhotoSortOrder.filenameAscending.sort(input).map(\.filename) == ["A.jpg", "B.jpg", "C.jpg"], "A–Z-Sortierung falsch")
         try require(PhotoSortOrder.filenameDescending.sort(input).map(\.filename) == ["C.jpg", "B.jpg", "A.jpg"], "Z–A-Sortierung falsch")
+    }
+
+    private static func checkMultiSelectionAndBatchDestinations() async throws {
+        let orderedIDs = ["a", "b", "c", "d"]
+        var selection = PhotoSelection()
+        selection.select("b", orderedIDs: orderedIDs)
+        selection.select("d", orderedIDs: orderedIDs, modifiers: [.range])
+        try require(selection.ids == Set(["b", "c", "d"]), "Bereichsauswahl ist falsch")
+        try require(selection.primaryID == "d", "Primärfoto der Bereichsauswahl ist falsch")
+
+        selection.select("c", orderedIDs: orderedIDs, modifiers: [.toggle])
+        try require(selection.ids == Set(["b", "d"]), "⌘-Klick entfernt kein ausgewähltes Foto")
+        selection.select("d", orderedIDs: orderedIDs, modifiers: [.toggle, .range])
+        try require(selection.ids == Set(["b", "c", "d"]), "⌘⇧-Klick ergänzt den Bereich nicht")
+
+        selection.selectAll(orderedIDs)
+        try require(selection.count == 4, "Alle sichtbaren Fotos wurden nicht ausgewählt")
+        selection.prune(to: ["a", "c"])
+        try require(selection.ids == Set(["a", "c"]), "Gelöschte Fotos blieben in der Auswahl")
+        selection.clear()
+        try require(selection.isEmpty && selection.primaryID == nil, "Auswahl wurde nicht vollständig aufgehoben")
+
+        try await withTemporaryDirectory { root in
+            let source = asset(name: "foto.jpg", date: Date())
+            touch(root.appendingPathComponent("foto.jpg"))
+            var reservedPaths: Set<String> = []
+            let first = PhotoExportService.availableDestinationURL(
+                for: source,
+                format: .jpeg,
+                in: root,
+                reservedPaths: &reservedPaths
+            )
+            let second = PhotoExportService.availableDestinationURL(
+                for: source,
+                format: .jpeg,
+                in: root,
+                reservedPaths: &reservedPaths
+            )
+            try require(first.lastPathComponent == "foto (2).jpg", "Vorhandenes Batch-Ziel würde überschrieben")
+            try require(second.lastPathComponent == "foto (3).jpg", "Doppelte Batch-Dateinamen sind nicht eindeutig")
+        }
+    }
+
+    private static func checkJustifiedLayout() async throws {
+        try require(
+            ImageMetadataReader.displayAspectRatio(pixelWidth: 6_000, pixelHeight: 4_000, orientation: 1) == 1.5,
+            "Querformat-Seitenverhältnis ist falsch"
+        )
+        try require(
+            ImageMetadataReader.displayAspectRatio(pixelWidth: 6_000, pixelHeight: 4_000, orientation: 6) == 2.0 / 3.0,
+            "EXIF-gedrehtes Hochformat wird nicht berücksichtigt"
+        )
+        let photos = (0..<4).map { index in
+            asset(name: "layout-\(index).jpg", date: Date(timeIntervalSince1970: Double(index)))
+        }
+        let ratios = Dictionary(uniqueKeysWithValues: photos.map { ($0.id, 4.0 / 3.0) })
+        let rows = JustifiedPhotoLayout.rows(
+            photos: photos,
+            aspectRatios: ratios,
+            availableWidth: 600,
+            targetImageHeight: 150
+        )
+        try require(rows.count == 2, "Blocksatz bildet nicht die erwarteten Zeilen")
+        let firstWidth = rows[0].items.reduce(0) { $0 + $1.width }
+            + Double(rows[0].items.count - 1) * JustifiedPhotoLayout.itemSpacing
+        try require(abs(firstWidth - 600) < 0.01, "Blocksatzzeile schließt nicht bündig ab")
+        try require(rows[1].imageHeight == 150, "Letzte Blocksatzzeile wurde unnötig vergrößert")
     }
 
     private static func checkLastSelectedFolder() async throws {
@@ -190,7 +287,7 @@ enum SelfTestRunner {
         try await withTemporaryDirectory { root in
             let source = root.appendingPathComponent("source.png")
             let destination = root.appendingPathComponent("export.jpg")
-            try writeTinyPNG(to: source)
+            try writePNG(width: 2, height: 1, to: source)
             let date = Date(timeIntervalSince1970: 100)
             let asset = PhotoAsset(
                 id: source.path,
@@ -201,9 +298,91 @@ enum SelfTestRunner {
                 modificationDate: date,
                 filename: source.lastPathComponent
             )
-            try await PhotoExportService().write(asset, format: .jpeg, to: destination)
+            try await PhotoExportService().write(asset, format: .jpeg, rotation: .right, to: destination)
             let metadata = ImageMetadataReader.metadata(at: destination)
-            try require(metadata.pixelWidth == 1 && metadata.pixelHeight == 1, "JPEG-Export ist nicht lesbar")
+            try require(metadata.pixelWidth == 1 && metadata.pixelHeight == 2, "JPEG-Export wurde nicht nach rechts gedreht")
+            try require(ImageMetadataReader.orientation(at: destination) == 1, "JPEG-Export enthält keine normalisierte Orientierung")
+
+            let rawURL = root.appendingPathComponent("original.CR3")
+            let rawData = Data([0x52, 0x41, 0x57])
+            try rawData.write(to: rawURL)
+            let sourceSidecar = rawURL.deletingPathExtension().appendingPathExtension("xmp")
+            let sidecarData = Data("<xmpmeta>rotation</xmpmeta>".utf8)
+            try sidecarData.write(to: sourceSidecar)
+            let rawAsset = PhotoAsset(
+                id: "raw:" + rawURL.path,
+                rawURL: rawURL,
+                companionURLs: [],
+                standaloneURL: nil,
+                captureDate: date,
+                modificationDate: date,
+                filename: rawURL.lastPathComponent
+            )
+            let rawDestination = root.appendingPathComponent("copy.CR3")
+            try await PhotoExportService().write(rawAsset, format: .original, to: rawDestination)
+            let copiedSidecar = rawDestination.deletingPathExtension().appendingPathExtension("xmp")
+            let copiedRawData = try Data(contentsOf: rawDestination)
+            let copiedSidecarData = try Data(contentsOf: copiedSidecar)
+            try require(copiedRawData == rawData, "Originalexport ist nicht bytegenau")
+            try require(copiedSidecarData == sidecarData, "Originalexport hat das RAW-Sidecar nicht mitgenommen")
+
+            let blockedDestination = root.appendingPathComponent("blocked.CR3")
+            let blockedSidecar = blockedDestination.deletingPathExtension().appendingPathExtension("xmp")
+            try Data("bestehend".utf8).write(to: blockedSidecar)
+            do {
+                try await PhotoExportService().write(rawAsset, format: .original, to: blockedDestination)
+                throw CheckFailure(message: "Vorhandenes Ziel-Sidecar wurde beim Originalexport akzeptiert")
+            } catch is PhotoExportError {
+                try require(!FileManager.default.fileExists(atPath: blockedDestination.path), "Bild wurde trotz Sidecar-Konflikt exportiert")
+            }
+        }
+    }
+
+    private static func checkPhotoRotation() async throws {
+        try require(PhotoRotation.none.rotatedRight() == .right, "Rechtsdrehung aus der Ausgangslage ist falsch")
+        try require(PhotoRotation.right.rotatedRight() == .upsideDown, "Zweite Rechtsdrehung ist falsch")
+        try require(PhotoRotation.none.rotatedLeft() == .left, "Linksdrehung aus der Ausgangslage ist falsch")
+        try require(PhotoRotation.left.rotatedRight() == .none, "Gegensätzliche Drehungen heben sich nicht auf")
+        try require(PhotoRotation.right.adjustedAspectRatio(1.5) == 2.0 / 3.0, "Gedrehtes Seitenverhältnis ist falsch")
+        try require(PhotoRotation.right.applying(toTIFFOrientation: 1) == 6, "TIFF-Orientierung 1 wurde falsch gedreht")
+        try require(PhotoRotation.right.applying(toTIFFOrientation: 6) == 3, "TIFF-Orientierung 6 wurde falsch gedreht")
+        try require(PhotoRotation.right.applying(toTIFFOrientation: 2) == 7, "Gespiegelte TIFF-Orientierung wurde falsch gedreht")
+        let expectedRightRotations = [6, 7, 8, 5, 2, 3, 4, 1]
+        for orientation in 1...8 {
+            try require(
+                PhotoRotation.right.applying(toTIFFOrientation: orientation) == expectedRightRotations[orientation - 1],
+                "TIFF-Orientierung \(orientation) wurde nicht korrekt zusammengesetzt"
+            )
+        }
+
+        try await withTemporaryDirectory { root in
+            let cache = root.appendingPathComponent("Cache", isDirectory: true)
+            let folder = root.appendingPathComponent("Fotos", isDirectory: true)
+            try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let source = folder.appendingPathComponent("gedreht.jpg")
+            touch(source)
+            let edit = PhotoRotationEdit(
+                photoID: "file:" + source.path,
+                sourcePath: source.path,
+                rotation: .right,
+                originalXMPOrientation: nil,
+                isOriginalXMPOrientationKnown: true,
+                isXMPSyncPending: false,
+                xmpSyncError: nil,
+                updatedAt: Date(timeIntervalSince1970: 321)
+            )
+            let catalog = PhotoCatalog()
+            try await catalog.configure(cacheDirectory: cache)
+            try await catalog.saveRotationEdit(edit)
+            let stored = try await catalog.rotationEdits(in: folder)
+            try require(stored == [edit], "Drehung wurde nicht im Katalog gespeichert")
+            try await catalog.removeAllFiles()
+            let afterIndexReset = try await catalog.rotationEdits(in: folder)
+            try require(afterIndexReset == [edit], "Index-Neuaufbau hat die Drehung gelöscht")
+            try await catalog.deleteRotationEdit(photoID: edit.photoID)
+            let afterDelete = try await catalog.rotationEdits(in: folder)
+            try require(afterDelete.isEmpty, "Zurückgesetzte Drehung blieb im Katalog")
         }
     }
 
@@ -410,6 +589,16 @@ enum SelfTestRunner {
             try require(mergedXML.contains("manuell") && mergedXML.contains("sonnenuntergang"), "Manuelle und neue Schlagwörter wurden nicht zusammengeführt")
             try require(mergedXML.components(separatedBy: ">manuell<").count == 2, "Schlagwort wurde doppelt geschrieben")
 
+            _ = try service.writeOrientation(6, for: asset)
+            let storedOrientation = try service.orientation(for: asset)
+            try require(storedOrientation == 6, "XMP-Orientierung wurde nicht gespeichert")
+            let orientedXML = try String(contentsOf: sidecarURL, encoding: .utf8)
+            try require(orientedXML.contains("tiff:Orientation=\"6\""), "Standardfeld tiff:Orientation fehlt")
+            try require(orientedXML.contains("crs:Exposure2012=\"0.50\""), "Drehung hat Lightroom-Metadaten verworfen")
+            _ = try service.writeOrientation(nil, for: asset)
+            let resetOrientation = try service.orientation(for: asset)
+            try require(resetOrientation == nil, "Zurücksetzen hat die XMP-Orientierung nicht entfernt")
+
             let unchanged = try service.writeKeywords(["sonnenuntergang"], for: asset)
             if case .unchanged = unchanged {} else {
                 throw CheckFailure(message: "Unverändertes XMP wurde unnötig neu geschrieben")
@@ -501,9 +690,9 @@ enum SelfTestRunner {
     }
 
     private static func checkThumbnailBuckets() async throws {
-        try require(ThumbnailService.pixelBucket(for: 100) == 256, "Kleine Vorschau hat falsche Größenstufe")
-        try require(ThumbnailService.pixelBucket(for: 400) == 512, "Mittlere Vorschau hat falsche Größenstufe")
-        try require(ThumbnailService.pixelBucket(for: 700) == 1_024, "Große Vorschau hat falsche Größenstufe")
+        try require(ThumbnailService.pixelBucket(for: 100) == 1_024, "Kleine Ansicht verwendet nicht den 1024er Cache")
+        try require(ThumbnailService.pixelBucket(for: 400) == 1_024, "Mittlere Ansicht verwendet nicht den 1024er Cache")
+        try require(ThumbnailService.pixelBucket(for: 1_600) == 1_024, "Große Ansicht verwendet nicht den 1024er Cache")
 
         try await withTemporaryDirectory { root in
             let cache = root.appendingPathComponent("Cache", isDirectory: true)
@@ -524,11 +713,18 @@ enum SelfTestRunner {
             let service = ThumbnailService()
             try await service.configure(cacheDirectory: cache, sizeLimitGB: 2)
             let rendered = await service.thumbnail(for: asset, requestedPixelSize: 256, scale: 2)
+            let smallView = await service.thumbnail(for: asset, requestedPixelSize: 100, scale: 1)
+            let largeView = await service.thumbnail(for: asset, requestedPixelSize: 1_600, scale: 1)
             let cachedIDs = await service.cachedAssetIDs(for: [asset], requestedPixelSize: 256)
             let stats = await service.statistics()
             try require(rendered != nil, "Test-Vorschaubild konnte nicht erzeugt werden")
+            try require(smallView != nil && largeView != nil, "1024er Vorschau wird nicht für alle Ansichtsgrößen wiederverwendet")
             try require(cachedIDs == [asset.id], "Erzeugtes Vorschaubild wurde nicht im Cache erkannt")
-            try require(stats.fileCount == 1 && stats.byteCount > 0, "Thumbnail-Cache-Statistik ist falsch")
+            try require(
+                service.cachedAspectRatio(for: asset, requestedPixelSize: 256) == 1,
+                "Seitenverhältnis wurde nicht aus dem Thumbnail-Cache gelesen"
+            )
+            try require(stats.fileCount == 1 && stats.byteCount > 0, "Ansichtsgrößen erzeugen mehr als eine Cachedatei")
         }
     }
 
@@ -576,6 +772,25 @@ enum SelfTestRunner {
             throw CheckFailure(message: "PNG-Testdaten ungültig")
         }
         try data.write(to: url)
+    }
+
+    private static func writePNG(width: Int, height: Int, to url: URL) throws {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ), let image = context.makeImage(),
+        let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)
+        else { throw CheckFailure(message: "PNG-Testbild konnte nicht erzeugt werden") }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            throw CheckFailure(message: "PNG-Testbild konnte nicht geschrieben werden")
+        }
     }
 
     private static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {

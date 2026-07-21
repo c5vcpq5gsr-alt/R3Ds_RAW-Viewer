@@ -33,6 +33,7 @@ struct RAWViewerApp: App {
                     store.chooseAndAddSources()
                 }
                 .keyboardShortcut("o", modifiers: .command)
+                .disabled(store.isCheckingSourceSize)
             }
 
             CommandMenu("Ansicht") {
@@ -63,11 +64,54 @@ struct RAWViewerApp: App {
                 .disabled(store.viewMode != .photo)
             }
 
+            CommandMenu("Bild") {
+                Button(rotationCommandTitle(direction: "links")) {
+                    store.rotateSelectedPhotoLeft()
+                }
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                .disabled(store.selectedPhotoCount == 0)
+
+                Button(rotationCommandTitle(direction: "rechts")) {
+                    store.rotateSelectedPhotoRight()
+                }
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                .disabled(store.selectedPhotoCount == 0)
+
+                Divider()
+
+                Button("Ausrichtung zurücksetzen") {
+                    store.resetSelectedRotation()
+                }
+                .keyboardShortcut("0", modifiers: [.command, .option])
+                .disabled(!store.canResetSelectedRotation)
+
+                Menu(store.selectedPhotoCount > 1 ? "\(store.selectedPhotoCount) Fotos exportieren" : "Exportieren") {
+                    ForEach(PhotoExportFormat.allCases, id: \.self) { format in
+                        Button(format.title + " …") {
+                            store.exportSelectedPhotos(as: format)
+                        }
+                    }
+                }
+                .disabled(store.selectedPhotoCount == 0 || store.isExporting)
+
+                if store.selectedPhotoNeedsXMPSync, let photo = store.selectedPhoto {
+                    Button("XMP erneut synchronisieren") {
+                        store.retryXMPSync(photo)
+                    }
+                }
+            }
+
         }
 
         Settings {
             SettingsView(store: store)
                 .preferredColorScheme(ThemePreference(rawValue: theme)?.colorScheme)
         }
+    }
+
+    private func rotationCommandTitle(direction: String) -> String {
+        store.selectedPhotoCount > 1
+            ? "\(store.selectedPhotoCount) Fotos nach \(direction) drehen"
+            : "Nach \(direction) drehen"
     }
 }

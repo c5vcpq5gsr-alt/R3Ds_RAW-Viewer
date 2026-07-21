@@ -9,7 +9,10 @@ struct SidebarView: View {
                 .frame(minHeight: 240)
 
             TabView {
-                PhotoMetadataView(asset: store.selectedPhoto)
+                PhotoMetadataView(
+                    asset: store.selectedPhoto,
+                    rotationEdit: store.selectedPhoto.flatMap(store.rotationEdit(for:))
+                )
                     .tabItem {
                         Label("Metadaten", systemImage: "info.circle")
                     }
@@ -35,6 +38,7 @@ struct SidebarView: View {
                     Button("Ordner hinzufügen") {
                         store.chooseAndAddSources()
                     }
+                    .disabled(store.isCheckingSourceSize)
                 }
             } else {
                 Section("Fotoquellen") {
@@ -66,7 +70,14 @@ struct SidebarView: View {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.borderless)
+                .disabled(store.isCheckingSourceSize)
                 .help("Fotoquelle hinzufügen")
+
+                if store.isCheckingSourceSize {
+                    ProgressView()
+                        .controlSize(.small)
+                        .help("Fotoanzahl einschließlich Unterordnern wird geprüft")
+                }
 
                 Button {
                     store.removeSelectedSource()

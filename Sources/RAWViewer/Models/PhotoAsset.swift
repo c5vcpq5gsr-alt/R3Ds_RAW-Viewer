@@ -41,3 +41,10 @@ enum LibraryViewMode: Sendable {
     case grid
     case photo
 }
+
+enum PhotoCollectionLayout: String, CaseIterable, Identifiable, Sendable {
+    case grid
+    case justified
+
+    var id: String { rawValue }
+}

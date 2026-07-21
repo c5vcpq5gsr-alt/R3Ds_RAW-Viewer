@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PhotoMetadataView: View {
     let asset: PhotoAsset?
+    let rotationEdit: PhotoRotationEdit?
     @State private var metadata: PhotoMetadata?
     @State private var isLoading = false
 
@@ -27,12 +28,12 @@ struct PhotoMetadataView: View {
             Group {
                 if asset == nil {
                     placeholder("Markiere ein Bild, um seine Metadaten anzuzeigen.")
-                } else if let metadata, metadata.isEmpty {
+                } else if let metadata, metadata.isEmpty, rotationEdit == nil {
                     placeholder("Für dieses Bild sind keine Metadaten verfügbar.")
                 } else if let metadata {
                     ScrollView {
                         Grid(alignment: .leading, horizontalSpacing: 9, verticalSpacing: 4) {
-                            ForEach(Array(metadata.rows.enumerated()), id: \.offset) { _, row in
+                            ForEach(Array(rows(for: metadata).enumerated()), id: \.offset) { _, row in
                                 GridRow(alignment: .firstTextBaseline) {
                                     Text(row.label + ":")
                                         .fontWeight(.semibold)
@@ -77,5 +78,16 @@ struct PhotoMetadataView: View {
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
             .padding()
+    }
+
+    private func rows(for metadata: PhotoMetadata) -> [(label: String, value: String)] {
+        var rows = metadata.rows
+        if let rotationEdit {
+            rows.insert(("Korrektur", rotationEdit.rotation.title), at: 0)
+            if rotationEdit.isXMPSyncPending {
+                rows.insert(("XMP", "Synchronisierung ausstehend"), at: 1)
+            }
+        }
+        return rows
     }
 }

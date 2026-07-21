@@ -63,6 +63,7 @@ enum PhotoSortOrder: String, CaseIterable, Identifiable, Sendable {
 enum PreferenceKeys {
     static let theme = "viewer.theme"
     static let gridTileSize = "viewer.gridTileSize"
+    static let collectionLayout = "viewer.collectionLayout"
     static let sortOrder = "viewer.sortOrder"
     static let savedSources = "library.savedSources"
     static let lastSelectedFolderPath = "library.lastSelectedFolderPath"

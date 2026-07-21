@@ -34,9 +34,11 @@ enum XMPSidecarWriteResult: Sendable {
 
 struct XMPSidecarService: Sendable {
     private static let maximumExistingFileSize: Int64 = 16 * 1_024 * 1_024
+    private static let fileAccessLock = NSLock()
     private static let xmpNamespace = "adobe:ns:meta/"
     private static let rdfNamespace = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
     private static let dcNamespace = "http://purl.org/dc/elements/1.1/"
+    private static let tiffNamespace = "http://ns.adobe.com/tiff/1.0/"
 
     func sidecarURL(for asset: PhotoAsset) -> URL? {
         guard let rawURL = asset.rawURL else { return nil }
@@ -50,6 +52,8 @@ struct XMPSidecarService: Sendable {
         replacingPersonKeywords previousKeywords: [String] = [],
         for asset: PhotoAsset
     ) throws -> XMPSidecarWriteResult {
+        Self.fileAccessLock.lock()
+        defer { Self.fileAccessLock.unlock() }
         guard let sidecarURL = sidecarURL(for: asset) else { throw XMPSidecarError.unsupportedPhoto }
         let normalizedKeywords = normalized(keywords)
         let desiredKeys = Set(normalizedKeywords.map(comparisonKey))
@@ -133,6 +137,102 @@ struct XMPSidecarService: Sendable {
         }
         try output.write(to: sidecarURL, options: .atomic)
         return existed ? .updated(sidecarURL) : .created(sidecarURL)
+    }
+
+    func orientation(for asset: PhotoAsset) throws -> Int? {
+        Self.fileAccessLock.lock()
+        defer { Self.fileAccessLock.unlock() }
+        guard let sidecarURL = sidecarURL(for: asset) else { throw XMPSidecarError.unsupportedPhoto }
+        guard FileManager.default.fileExists(atPath: sidecarURL.path) else { return nil }
+        let document = try readDocument(at: sidecarURL)
+        let description = try rdfDescription(in: document)
+        return orientation(in: description)
+    }
+
+    func writeOrientation(_ desiredOrientation: Int?, for asset: PhotoAsset) throws -> XMPSidecarWriteResult {
+        Self.fileAccessLock.lock()
+        defer { Self.fileAccessLock.unlock() }
+        if let desiredOrientation, !(1...8).contains(desiredOrientation) {
+            throw XMPSidecarError.invalidDocument("Der XMP-Orientierungswert muss zwischen 1 und 8 liegen.")
+        }
+        guard let sidecarURL = sidecarURL(for: asset) else { throw XMPSidecarError.unsupportedPhoto }
+        let existed = FileManager.default.fileExists(atPath: sidecarURL.path)
+        guard existed || desiredOrientation != nil else { return .unchanged(sidecarURL) }
+
+        let document = try existed ? readDocument(at: sidecarURL) : makeDocument()
+        let existingData = existed ? try Data(contentsOf: sidecarURL, options: .mappedIfSafe) : nil
+        let description = try rdfDescription(in: document)
+        let existingOrientation = orientation(in: description)
+        guard existingOrientation != desiredOrientation else { return .unchanged(sidecarURL) }
+
+        let orientationAttributes = (description.attributes ?? []).filter {
+            $0.localName == "Orientation" || $0.name == "tiff:Orientation"
+        }
+        let orientationElements = try description.nodes(forXPath: "./*[local-name()='Orientation']")
+        for node in orientationAttributes + orientationElements {
+            node.detach()
+        }
+
+        if let desiredOrientation {
+            ensureNamespace(prefix: "tiff", uri: Self.tiffNamespace, on: description)
+            description.addAttribute(
+                XMLNode.attribute(withName: "tiff:Orientation", stringValue: String(desiredOrientation)) as! XMLNode
+            )
+        }
+
+        let output = document.xmlData(options: [.nodePrettyPrint])
+        if output == existingData { return .unchanged(sidecarURL) }
+        try output.write(to: sidecarURL, options: .atomic)
+        return existed ? .updated(sidecarURL) : .created(sidecarURL)
+    }
+
+    private func readDocument(at sidecarURL: URL) throws -> XMLDocument {
+        let values = try sidecarURL.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .isSymbolicLinkKey,
+            .fileSizeKey
+        ])
+        guard values.isRegularFile == true else {
+            throw XMPSidecarError.unsafeExistingFile("Es ist keine reguläre Datei.")
+        }
+        guard values.isSymbolicLink != true else {
+            throw XMPSidecarError.unsafeExistingFile("Symbolische Links werden nicht überschrieben.")
+        }
+        let byteCount = Int64(values.fileSize ?? 0)
+        guard byteCount <= Self.maximumExistingFileSize else {
+            throw XMPSidecarError.fileTooLarge(byteCount)
+        }
+        let data = try Data(contentsOf: sidecarURL, options: .mappedIfSafe)
+        let preview = String(decoding: data.prefix(8_192), as: UTF8.self).uppercased()
+        guard !preview.contains("<!DOCTYPE"), !preview.contains("<!ENTITY") else {
+            throw XMPSidecarError.unsafeExistingFile("Dokumenttyp- und Entity-Deklarationen werden nicht verarbeitet.")
+        }
+        let document: XMLDocument
+        do {
+            document = try XMLDocument(
+                data: data,
+                options: [.nodePreserveAll, .nodeLoadExternalEntitiesNever]
+            )
+        } catch {
+            throw XMPSidecarError.invalidDocument(error.localizedDescription)
+        }
+        guard document.dtd == nil else {
+            throw XMPSidecarError.unsafeExistingFile("Dokumenttyp-Deklarationen werden nicht verarbeitet.")
+        }
+        return document
+    }
+
+    private func orientation(in description: XMLElement) -> Int? {
+        let attributeValue = (description.attributes ?? []).first {
+            $0.localName == "Orientation" || $0.name == "tiff:Orientation"
+        }?.stringValue
+        let elementValue = try? description.nodes(
+            forXPath: "./*[local-name()='Orientation']"
+        ).first?.stringValue
+        guard let value = attributeValue ?? elementValue,
+              let orientation = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              (1...8).contains(orientation) else { return nil }
+        return orientation
     }
 
     private func makeDocument() -> XMLDocument {

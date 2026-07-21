@@ -4,7 +4,7 @@ struct SettingsView: View {
     @ObservedObject var store: LibraryStore
     @AppStorage(PreferenceKeys.theme) private var theme = ThemePreference.system.rawValue
     @AppStorage(PreferenceKeys.gridTileSize) private var gridTileSize = 180.0
-    @AppStorage(PreferenceKeys.cacheSizeLimitGB) private var cacheSizeLimitGB = 8
+    @AppStorage(PreferenceKeys.cacheSizeLimitGB) private var cacheSizeLimitGB = 20
     @State private var confirmation: CacheConfirmation?
 
     var body: some View {
@@ -107,12 +107,11 @@ struct SettingsView: View {
             }
 
             Section("Begrenzung und Belegung") {
-                Picker("Maximale Thumbnail-Größe", selection: $cacheSizeLimitGB) {
-                    Text("2 GB").tag(2)
-                    Text("5 GB").tag(5)
-                    Text("8 GB").tag(8)
+                Picker("Maximaler Cache-Speicher", selection: $cacheSizeLimitGB) {
                     Text("10 GB").tag(10)
                     Text("20 GB").tag(20)
+                    Text("50 GB").tag(50)
+                    Text("100 GB").tag(100)
                 }
                 .onChange(of: cacheSizeLimitGB) { _, value in
                     store.updateCacheSizeLimit(value)

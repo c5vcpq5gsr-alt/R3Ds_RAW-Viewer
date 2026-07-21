@@ -17,6 +17,38 @@ Nach dem Einlesen erzeugt die App zuerst die sichtbaren und anschließend alle �
 Vorschaubilder des ausgewählten Ordners im Hintergrund. Der Grid-Kopf zeigt Prüfung,
 Fortschritt, Abschluss und gegebenenfalls fehlgeschlagene Vorschaubilder an.
 
+## Mehrfachauswahl und Export
+
+Im Raster und in der Blocksatzansicht ersetzt ein einfacher Klick die Auswahl. Mit
+**⌘-Klick** lassen sich einzelne Fotos ergänzen oder entfernen, **⇧-Klick** markiert
+einen zusammenhängenden Bereich, **⌘A** alle sichtbaren Fotos und **Esc** hebt die
+Auswahl auf. Die Anzahl der markierten Fotos steht im Grid-Kopf.
+
+Drehen, Zurücksetzen und Exportieren wirken über Toolbar, Menü und Kontextmenü auf
+die gesamte Auswahl. Für mehrere Fotos fragt RAW Viewer einmal nach einem Zielordner,
+zeigt den Fortschritt im Grid-Kopf und überschreibt keine vorhandenen Dateien:
+Namenskollisionen erhalten automatisch eine laufende Nummer.
+
+## Non-destruktive Ausrichtung
+
+Ausgewählte Fotos lassen sich über die Einzelbild-Toolbar, das Kontextmenü oder das
+Menü **Bild** in 90-Grad-Schritten nach links und rechts drehen. Die Korrektur wird im
+SQLite-Katalog gespeichert und auf Grid, Blocksatz und Einzelbild angewendet, ohne die
+Originalpixel oder den 1024-Pixel-Vorschaucache zu verändern. **Ausrichtung zurücksetzen**
+stellt den Zustand vor der ersten RAW-Viewer-Korrektur wieder her.
+
+Bei proprietären Kamera-RAWs schreibt RAW Viewer die korrigierte TIFF-Orientierung
+zusätzlich sofort und atomar in das zugehörige XMP-Sidecar. Vorhandene Lightroom-Felder
+und Schlagwörter bleiben erhalten. DNG, JPEG, HEIC, PNG und TIFF bleiben katalogbasiert,
+damit ihre Originaldateien nicht für eine Metadatenänderung neu geschrieben werden.
+Falls ein Sidecar nicht sicher aktualisiert werden kann, bleibt die Katalogkorrektur
+aktiv und der XMP-Abgleich kann im Kontextmenü wiederholt werden.
+
+JPEG-, PNG- und TIFF-Exporte rechnen die Drehung in die neue Bilddatei ein. Der
+Originalexport bleibt bytegenau und nimmt bei proprietären RAWs das vorhandene
+XMP-Sidecar neben die Kopie mit; ein bestehendes Ziel-Sidecar wird nicht still
+überschrieben.
+
 ## Lokale Fotoanalyse mit LM Studio
 
 Unter **Einstellungen → KI-Analyse** lassen sich die Basisadresse eines lokalen oder

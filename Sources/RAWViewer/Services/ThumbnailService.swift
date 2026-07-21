@@ -46,6 +46,8 @@ private actor ThumbnailRequestBroker {
 }
 
 final class ThumbnailService: @unchecked Sendable {
+    static let cachedPixelSize = 1_024
+
     private let memoryCache = NSCache<NSString, NSImage>()
     private let generator = QLThumbnailGenerator.shared
     private let fileManager = FileManager.default
@@ -53,7 +55,7 @@ final class ThumbnailService: @unchecked Sendable {
     private let requestBroker = ThumbnailRequestBroker()
     private let maintenanceQueue = DispatchQueue(label: "de.r3d.rawviewer.thumbnail-maintenance", qos: .utility)
     private var thumbnailsDirectory: URL?
-    private var sizeLimitBytes: Int64 = 8 * 1_024 * 1_024 * 1_024
+    private var sizeLimitBytes: Int64 = 20 * 1_024 * 1_024 * 1_024
     private var writesSinceMaintenance = 0
 
     init() {
@@ -126,6 +128,43 @@ final class ThumbnailService: @unchecked Sendable {
         }.value
     }
 
+    func cachedAspectRatio(for asset: PhotoAsset, requestedPixelSize: Int) -> Double? {
+        let bucket = Self.pixelBucket(for: requestedPixelSize)
+        let url = asset.previewURL
+        let previewModificationDate = modificationDate(for: url, fallback: asset.modificationDate)
+        let key = cacheKey(url: url, modificationDate: previewModificationDate, bucket: bucket)
+        if let cached = memoryCache.object(forKey: key as NSString) {
+            return Self.pixelAspectRatio(of: cached)
+        }
+        guard let diskURL = diskURL(for: key, bucket: bucket),
+              let source = CGImageSourceCreateWithURL(diskURL as CFURL, [
+                kCGImageSourceShouldCache: false
+              ] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue else {
+            return nil
+        }
+        let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue
+        return ImageMetadataReader.displayAspectRatio(
+            pixelWidth: width,
+            pixelHeight: height,
+            orientation: orientation
+        )
+    }
+
+    static func pixelAspectRatio(of image: NSImage) -> Double? {
+        guard let size = pixelSize(of: image) else { return nil }
+        return Double(size.width) / Double(size.height)
+    }
+
+    static func pixelSize(of image: NSImage) -> CGSize? {
+        guard let representation = image.representations.max(by: {
+            $0.pixelsWide * $0.pixelsHigh < $1.pixelsWide * $1.pixelsHigh
+        }), representation.pixelsWide > 0, representation.pixelsHigh > 0 else { return nil }
+        return CGSize(width: representation.pixelsWide, height: representation.pixelsHigh)
+    }
+
     private func loadOrGenerate(url: URL, key: String, bucket: Int, scale: CGFloat) async -> NSImage? {
         if let cached = memoryCache.object(forKey: key as NSString) { return cached }
 
@@ -184,9 +223,8 @@ final class ThumbnailService: @unchecked Sendable {
     }
 
     static func pixelBucket(for requestedPixelSize: Int) -> Int {
-        if requestedPixelSize <= 256 { return 256 }
-        if requestedPixelSize <= 512 { return 512 }
-        return 1_024
+        _ = requestedPixelSize
+        return cachedPixelSize
     }
 
     private static func imageIOThumbnail(url: URL, maxPixelSize: Int) -> NSImage? {

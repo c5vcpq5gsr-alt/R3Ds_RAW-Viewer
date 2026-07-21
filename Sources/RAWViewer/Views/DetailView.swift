@@ -7,10 +7,18 @@ struct DetailView: View {
         Group {
             if store.selectedFolderURL == nil {
                 WelcomeView(store: store)
-            } else if store.viewMode == .photo, let photo = store.selectedPhoto {
-                PhotoDetailView(asset: photo, store: store)
             } else {
-                PhotoGridView(store: store)
+                ZStack {
+                    PhotoGridView(store: store)
+                        .opacity(store.viewMode == .grid ? 1 : 0)
+                        .allowsHitTesting(store.viewMode == .grid)
+                        .accessibilityHidden(store.viewMode == .photo)
+
+                    if store.viewMode == .photo, let photo = store.selectedPhoto {
+                        PhotoDetailView(asset: photo, store: store)
+                            .zIndex(1)
+                    }
+                }
             }
         }
         .navigationTitle(navigationTitle)

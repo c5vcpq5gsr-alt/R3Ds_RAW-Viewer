@@ -14,7 +14,7 @@ struct PhotoDetailView: View {
     @State private var scrollOffset = CGPoint.zero
     @State private var panStartOffset: CGPoint?
     @State private var isPointerOverImage = false
-    @FocusState private var hasKeyboardFocus: Bool
+    @State private var focusRequestToken = 0
 
     var body: some View {
         GeometryReader { geometry in
@@ -63,6 +63,11 @@ struct PhotoDetailView: View {
                             .truncationMode(.middle)
                         Text(asset.typeLabel)
                             .foregroundStyle(.secondary)
+                        let rotation = store.rotation(for: asset)
+                        if rotation != .none {
+                            Label(rotation.title, systemImage: "rotate.right")
+                                .foregroundStyle(.secondary)
+                        }
                         Spacer()
                         if store.viewerFitsWindow {
                             Text("Eingepasst")
@@ -80,40 +85,69 @@ struct PhotoDetailView: View {
                 await loadImage(viewport: geometry.size)
             }
         }
-        .focusable()
-        .focused($hasKeyboardFocus)
-        .focusEffectDisabled()
+        .background {
+            FirstResponderBridge(
+                requestToken: focusRequestToken,
+                handleKeyDown: handleKeyDown
+            )
+            .frame(width: 0, height: 0)
+        }
         .onAppear {
-            hasKeyboardFocus = true
+            requestKeyboardFocus()
         }
         .onChange(of: asset.id) { _, _ in
             resetPanPosition()
-            hasKeyboardFocus = true
+            requestKeyboardFocus()
+        }
+        .onChange(of: store.rotation(for: asset)) { _, _ in
+            store.fitImage()
+            resetPanPosition()
+            requestKeyboardFocus()
         }
         .onDisappear {
             NSCursor.arrow.set()
         }
-        .onMoveCommand { direction in
-            switch direction {
-            case .left: store.showPreviousPhoto()
-            case .right: store.showNextPhoto()
-            default: break
-            }
-        }
-        .onExitCommand {
-            store.closePhoto()
-        }
         .photoContextMenu(asset: asset, store: store)
     }
 
+    private func handleKeyDown(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard modifiers.isEmpty else { return false }
+        switch event.keyCode {
+        case 53:
+            store.closePhoto()
+        case 123:
+            store.showPreviousPhoto()
+        case 124:
+            store.showNextPhoto()
+        default:
+            return false
+        }
+        return true
+    }
+
+    private func requestKeyboardFocus() {
+        Task { @MainActor in
+            await Task.yield()
+            focusRequestToken &+= 1
+        }
+    }
+
     private func zoomableImage(_ rendered: RenderedImage, viewport: CGSize) -> some View {
+        let rotation = store.rotation(for: asset)
+        let displayPixelSize = rotation.displaySize(for: rendered.pixelSize)
         let fitScale = min(
-            max(0.01, (viewport.width - 32) / rendered.pixelSize.width),
-            max(0.01, (viewport.height - 64) / rendered.pixelSize.height)
+            max(0.01, (viewport.width - 32) / displayPixelSize.width),
+            max(0.01, (viewport.height - 64) / displayPixelSize.height)
         )
         let scale = store.viewerFitsWindow ? min(1, fitScale) : store.viewerZoom
-        let width = max(1, rendered.pixelSize.width * scale)
-        let height = max(1, rendered.pixelSize.height * scale)
+        let unrotatedSize = CGSize(
+            width: max(1, rendered.pixelSize.width * scale),
+            height: max(1, rendered.pixelSize.height * scale)
+        )
+        let displaySize = rotation.displaySize(for: unrotatedSize)
+        let width = displaySize.width
+        let height = displaySize.height
         let maximumOffset = CGPoint(
             x: max(0, width - viewport.width),
             y: max(0, height - viewport.height)
@@ -121,10 +155,11 @@ struct PhotoDetailView: View {
         let canPan = maximumOffset.x > 0 || maximumOffset.y > 0
 
         return ScrollView([.horizontal, .vertical]) {
-            Image(nsImage: rendered.image)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: width, height: height)
+            RotatedPhotoImage(
+                image: rendered.image,
+                rotation: rotation,
+                unrotatedSize: unrotatedSize
+            )
                 .frame(
                     minWidth: max(1, viewport.width),
                     minHeight: max(1, viewport.height - 30),
@@ -245,7 +280,15 @@ struct PhotoDetailView: View {
         isRendering = true
         defer { isRendering = false }
 
-        if renderedImage == nil, asset.rawURL != nil, !asset.companionURLs.isEmpty {
+        var displayedPreview = false
+        if renderedImage == nil,
+           let thumbnailPreview = await store.thumbnailPreview(for: asset) {
+            guard !Task.isCancelled else { return }
+            renderedImage = thumbnailPreview
+            displayedPreview = true
+        }
+
+        if asset.rawURL != nil, !asset.companionURLs.isEmpty {
             do {
                 let preview = try await store.renderImage(
                     url: asset.previewURL,
@@ -254,10 +297,19 @@ struct PhotoDetailView: View {
                 )
                 try Task.checkCancellation()
                 renderedImage = preview
+                displayedPreview = true
             } catch is CancellationError {
                 return
             } catch {
                 // The RAW pass below still has a chance to produce an image.
+            }
+        }
+
+        if displayedPreview {
+            do {
+                try await Task.sleep(for: .milliseconds(350))
+            } catch {
+                return
             }
         }
 

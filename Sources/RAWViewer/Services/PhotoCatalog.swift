@@ -72,6 +72,19 @@ actor PhotoCatalog {
             """)
         try migrateXMPExportsIfNeeded()
         try execute("""
+            CREATE TABLE IF NOT EXISTS photo_rotation_edits (
+                photo_id TEXT PRIMARY KEY NOT NULL,
+                source_path TEXT NOT NULL,
+                quarter_turns INTEGER NOT NULL CHECK(quarter_turns BETWEEN 0 AND 3),
+                original_xmp_orientation INTEGER,
+                original_xmp_orientation_known INTEGER NOT NULL,
+                xmp_sync_pending INTEGER NOT NULL,
+                xmp_sync_error TEXT,
+                updated_at REAL NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS photo_rotation_edits_source_path_index ON photo_rotation_edits(source_path)")
+        try execute("""
             CREATE TABLE IF NOT EXISTS people (
                 person_id TEXT PRIMARY KEY NOT NULL,
                 display_name TEXT NOT NULL,
@@ -127,7 +140,7 @@ actor PhotoCatalog {
             """)
         try execute("CREATE INDEX IF NOT EXISTS face_observations_photo_index ON face_observations(photo_id)")
         try execute("CREATE INDEX IF NOT EXISTS face_observations_cluster_index ON face_observations(cluster_id)")
-        try execute("PRAGMA user_version=2")
+        try execute("PRAGMA user_version=3")
     }
 
     func files(in folderURL: URL) throws -> [IndexedPhotoFile] {
@@ -263,8 +276,12 @@ actor PhotoCatalog {
                 "DELETE FROM xmp_exports WHERE source_path = ? OR source_path LIKE ? ESCAPE '\\'"
             )
             defer { sqlite3_finalize(exportStatement) }
+            let rotationStatement = try prepare(
+                "DELETE FROM photo_rotation_edits WHERE source_path = ? OR source_path LIKE ? ESCAPE '\\'"
+            )
+            defer { sqlite3_finalize(rotationStatement) }
             for path in Set(paths) {
-                for target in [scanStatement, exportStatement] {
+                for target in [scanStatement, exportStatement, rotationStatement] {
                     sqlite3_reset(target)
                     sqlite3_clear_bindings(target)
                     bind(path, at: 1, to: target)
@@ -419,6 +436,85 @@ actor PhotoCatalog {
         bind(record.keywordsJSON, at: 3, to: statement)
         bind(record.sidecarPath, at: 4, to: statement)
         sqlite3_bind_double(statement, 5, record.exportedAt.timeIntervalSince1970)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw PhotoCatalogError.unavailable(errorMessage)
+        }
+    }
+
+    func rotationEdits(in folderURL: URL) throws -> [PhotoRotationEdit] {
+        let statement = try prepare("""
+            SELECT photo_id, source_path, quarter_turns, original_xmp_orientation,
+                   original_xmp_orientation_known, xmp_sync_pending, xmp_sync_error, updated_at
+            FROM photo_rotation_edits
+            WHERE source_path LIKE ? ESCAPE '\\'
+            ORDER BY source_path
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(scopePattern(for: folderURL), at: 1, to: statement)
+
+        var results: [PhotoRotationEdit] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let photoID = textColumn(statement, at: 0),
+                  let sourcePath = textColumn(statement, at: 1),
+                  let rotation = PhotoRotation(rawValue: Int(sqlite3_column_int(statement, 2))) else { continue }
+            let originalOrientation: Int? = sqlite3_column_type(statement, 3) == SQLITE_NULL
+                ? nil
+                : Int(sqlite3_column_int(statement, 3))
+            results.append(PhotoRotationEdit(
+                photoID: photoID,
+                sourcePath: sourcePath,
+                rotation: rotation,
+                originalXMPOrientation: originalOrientation,
+                isOriginalXMPOrientationKnown: sqlite3_column_int(statement, 4) != 0,
+                isXMPSyncPending: sqlite3_column_int(statement, 5) != 0,
+                xmpSyncError: textColumn(statement, at: 6),
+                updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 7))
+            ))
+        }
+        return results
+    }
+
+    func saveRotationEdit(_ edit: PhotoRotationEdit) throws {
+        let statement = try prepare("""
+            INSERT INTO photo_rotation_edits(
+                photo_id, source_path, quarter_turns, original_xmp_orientation,
+                original_xmp_orientation_known, xmp_sync_pending, xmp_sync_error, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(photo_id) DO UPDATE SET
+                source_path = excluded.source_path,
+                quarter_turns = excluded.quarter_turns,
+                original_xmp_orientation = excluded.original_xmp_orientation,
+                original_xmp_orientation_known = excluded.original_xmp_orientation_known,
+                xmp_sync_pending = excluded.xmp_sync_pending,
+                xmp_sync_error = excluded.xmp_sync_error,
+                updated_at = excluded.updated_at
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(edit.photoID, at: 1, to: statement)
+        bind(edit.sourcePath, at: 2, to: statement)
+        sqlite3_bind_int(statement, 3, Int32(edit.rotation.rawValue))
+        if let orientation = edit.originalXMPOrientation {
+            sqlite3_bind_int(statement, 4, Int32(orientation))
+        } else {
+            sqlite3_bind_null(statement, 4)
+        }
+        sqlite3_bind_int(statement, 5, edit.isOriginalXMPOrientationKnown ? 1 : 0)
+        sqlite3_bind_int(statement, 6, edit.isXMPSyncPending ? 1 : 0)
+        if let error = edit.xmpSyncError {
+            bind(error, at: 7, to: statement)
+        } else {
+            sqlite3_bind_null(statement, 7)
+        }
+        sqlite3_bind_double(statement, 8, edit.updatedAt.timeIntervalSince1970)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw PhotoCatalogError.unavailable(errorMessage)
+        }
+    }
+
+    func deleteRotationEdit(photoID: PhotoAsset.ID) throws {
+        let statement = try prepare("DELETE FROM photo_rotation_edits WHERE photo_id = ?")
+        defer { sqlite3_finalize(statement) }
+        bind(photoID, at: 1, to: statement)
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw PhotoCatalogError.unavailable(errorMessage)
         }

@@ -47,18 +47,40 @@ enum PhotoExportFormat: String, CaseIterable, Sendable {
 enum PhotoExportError: LocalizedError {
     case encodingFailed
     case unsupportedRAW
+    case sidecarAlreadyExists(String)
 
     var errorDescription: String? {
         switch self {
         case .encodingFailed: "Die Bilddatei konnte nicht exportiert werden."
         case .unsupportedRAW: "Dieses RAW-Format kann von macOS nicht konvertiert werden."
+        case .sidecarAlreadyExists(let filename):
+            "Neben dem Exportziel existiert bereits \(filename). Das Sidecar wurde nicht überschrieben; wähle bitte einen anderen Zielnamen."
         }
     }
 }
 
+struct PhotoExportItem: Sendable {
+    let asset: PhotoAsset
+    let rotation: PhotoRotation
+}
+
+struct BatchPhotoExportFailure: Sendable {
+    let filename: String
+    let message: String
+}
+
+struct BatchPhotoExportResult: Sendable {
+    let exportedCount: Int
+    let failures: [BatchPhotoExportFailure]
+}
+
 struct PhotoExportService: Sendable {
     @MainActor
-    func chooseDestinationAndExport(_ asset: PhotoAsset, format: PhotoExportFormat) async throws {
+    func chooseDestinationAndExport(
+        _ asset: PhotoAsset,
+        format: PhotoExportFormat,
+        rotation: PhotoRotation = .none
+    ) async throws -> Bool {
         let suggestedURL = format.outputURL(for: asset)
         let panel = NSSavePanel()
         panel.title = format == .original ? "Original exportieren" : "Als \(format.title) exportieren"
@@ -67,17 +89,67 @@ struct PhotoExportService: Sendable {
         panel.allowedContentTypes = [format.contentType(for: asset)]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-        try await write(asset, format: format, to: destination)
+        guard panel.runModal() == .OK, let destination = panel.url else { return false }
+        try await write(asset, format: format, rotation: rotation, to: destination)
+        return true
     }
 
-    func write(_ asset: PhotoAsset, format: PhotoExportFormat, to destination: URL) async throws {
+    @MainActor
+    func chooseDirectoryAndExport(
+        _ items: [PhotoExportItem],
+        format: PhotoExportFormat,
+        progress: @MainActor (Int, Int) -> Void
+    ) async throws -> BatchPhotoExportResult? {
+        guard !items.isEmpty else { return BatchPhotoExportResult(exportedCount: 0, failures: []) }
+        let panel = NSOpenPanel()
+        panel.title = "\(items.count) Fotos als \(format.title) exportieren"
+        panel.message = "Wähle einen Zielordner. Vorhandene Dateien werden nicht überschrieben."
+        panel.prompt = "Ordner auswählen"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let directory = panel.url else { return nil }
+
+        var reservedPaths: Set<String> = []
+        var failures: [BatchPhotoExportFailure] = []
+        var exportedCount = 0
+        for item in items {
+            try Task.checkCancellation()
+            let destination = Self.availableDestinationURL(
+                for: item.asset,
+                format: format,
+                in: directory,
+                reservedPaths: &reservedPaths
+            )
+            do {
+                try await write(item.asset, format: format, rotation: item.rotation, to: destination)
+                exportedCount += 1
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                failures.append(BatchPhotoExportFailure(
+                    filename: item.asset.filename,
+                    message: error.localizedDescription
+                ))
+            }
+            progress(exportedCount, failures.count)
+        }
+        return BatchPhotoExportResult(exportedCount: exportedCount, failures: failures)
+    }
+
+    func write(
+        _ asset: PhotoAsset,
+        format: PhotoExportFormat,
+        rotation: PhotoRotation = .none,
+        to destination: URL
+    ) async throws {
         let worker = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
             if format == .original {
-                try Self.copyReplacingExisting(from: asset.primaryURL, to: destination)
+                try Self.copyOriginalWithSidecar(asset: asset, to: destination)
             } else {
-                try Self.encode(asset: asset, format: format, to: destination)
+                try Self.encode(asset: asset, format: format, rotation: rotation, to: destination)
             }
             try Task.checkCancellation()
         }
@@ -102,7 +174,87 @@ struct PhotoExportService: Sendable {
         }
     }
 
-    private static func encode(asset: PhotoAsset, format: PhotoExportFormat, to destination: URL) throws {
+    private static func copyOriginalWithSidecar(asset: PhotoAsset, to destination: URL) throws {
+        let sourceSidecar = proprietaryRAWSidecarURL(for: asset)
+        let destinationSidecar = sourceSidecar.map { _ in
+            destination.deletingPathExtension().appendingPathExtension("xmp")
+        }
+        if let sourceSidecar, let destinationSidecar,
+           FileManager.default.fileExists(atPath: sourceSidecar.path),
+           sourceSidecar.standardizedFileURL != destinationSidecar.standardizedFileURL,
+           FileManager.default.fileExists(atPath: destinationSidecar.path) {
+            throw PhotoExportError.sidecarAlreadyExists(destinationSidecar.lastPathComponent)
+        }
+
+        try copyReplacingExisting(from: asset.primaryURL, to: destination)
+        if let sourceSidecar, let destinationSidecar,
+           FileManager.default.fileExists(atPath: sourceSidecar.path) {
+            try copyReplacingExisting(from: sourceSidecar, to: destinationSidecar)
+        }
+    }
+
+    private static func proprietaryRAWSidecarURL(for asset: PhotoAsset) -> URL? {
+        guard let rawURL = asset.rawURL, rawURL.pathExtension.lowercased() != "dng" else { return nil }
+        return rawURL.deletingPathExtension().appendingPathExtension("xmp")
+    }
+
+    static func availableDestinationURL(
+        for asset: PhotoAsset,
+        format: PhotoExportFormat,
+        in directory: URL,
+        reservedPaths: inout Set<String>
+    ) -> URL {
+        let suggestedName = format.outputURL(for: asset).lastPathComponent
+        let suggestedURL = URL(fileURLWithPath: suggestedName)
+        let baseName = suggestedURL.deletingPathExtension().lastPathComponent
+        let pathExtension = suggestedURL.pathExtension
+        var suffix = 1
+
+        while true {
+            let filename: String
+            if suffix == 1 {
+                filename = suggestedName
+            } else if pathExtension.isEmpty {
+                filename = "\(baseName) (\(suffix))"
+            } else {
+                filename = "\(baseName) (\(suffix)).\(pathExtension)"
+            }
+            let candidate = directory.appendingPathComponent(filename)
+            let candidatePath = candidate.standardizedFileURL.path
+            let sidecarPath = batchSidecarPath(for: asset, format: format, destination: candidate)
+            let imageConflict = reservedPaths.contains(candidatePath)
+                || FileManager.default.fileExists(atPath: candidatePath)
+            let sidecarConflict = sidecarPath.map {
+                reservedPaths.contains($0) || FileManager.default.fileExists(atPath: $0)
+            } ?? false
+            if !imageConflict, !sidecarConflict {
+                reservedPaths.insert(candidatePath)
+                if let sidecarPath { reservedPaths.insert(sidecarPath) }
+                return candidate
+            }
+            suffix += 1
+        }
+    }
+
+    private static func batchSidecarPath(
+        for asset: PhotoAsset,
+        format: PhotoExportFormat,
+        destination: URL
+    ) -> String? {
+        guard format == .original,
+              let sourceSidecar = proprietaryRAWSidecarURL(for: asset),
+              FileManager.default.fileExists(atPath: sourceSidecar.path) else { return nil }
+        return destination.deletingPathExtension()
+            .appendingPathExtension("xmp")
+            .standardizedFileURL.path
+    }
+
+    private static func encode(
+        asset: PhotoAsset,
+        format: PhotoExportFormat,
+        rotation: PhotoRotation,
+        to destination: URL
+    ) throws {
         let sourceURL = asset.rawURL ?? asset.primaryURL
         let cgImage: CGImage
         let properties: [CFString: Any]
@@ -115,7 +267,7 @@ struct PhotoExportService: Sendable {
             guard extent.width > 0, extent.height > 0,
                   let rendered = CIContext(options: [.cacheIntermediates: false]).createCGImage(output, from: extent)
             else { throw PhotoExportError.encodingFailed }
-            cgImage = rendered
+            cgImage = try rotated(rendered, by: rotation)
             properties = imageProperties(at: sourceURL)
         } else {
             guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, [
@@ -133,7 +285,7 @@ struct PhotoExportService: Sendable {
             guard let rendered = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
                 throw PhotoExportError.encodingFailed
             }
-            cgImage = rendered
+            cgImage = try rotated(rendered, by: rotation)
             properties = sourceProperties
         }
 
@@ -161,6 +313,16 @@ struct PhotoExportService: Sendable {
         } else {
             try fileManager.moveItem(at: temporary, to: destination)
         }
+    }
+
+    private static func rotated(_ image: CGImage, by rotation: PhotoRotation) throws -> CGImage {
+        guard rotation != .none else { return image }
+        let oriented = CIImage(cgImage: image).oriented(forExifOrientation: rotation.exifOrientationForPixelRotation)
+        let extent = oriented.extent.integral
+        guard extent.width > 0, extent.height > 0,
+              let output = CIContext(options: [.cacheIntermediates: false]).createCGImage(oriented, from: extent)
+        else { throw PhotoExportError.encodingFailed }
+        return output
     }
 
     private static func imageProperties(at url: URL) -> [CFString: Any] {

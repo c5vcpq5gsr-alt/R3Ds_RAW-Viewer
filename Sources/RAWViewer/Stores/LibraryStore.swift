@@ -8,6 +8,21 @@ struct ViewerActionError: Identifiable {
     let message: String
 }
 
+struct LargePhotoSourceWarning: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+    let oversizedFolders: [URL]
+
+    var message: String {
+        let limit = PhotoFolderSizeChecker.recommendedPhotoLimit.formatted(.number.grouping(.automatic))
+        if oversizedFolders.count == 1, let folder = oversizedFolders.first {
+            return "Der Ordner „\(folder.lastPathComponent)“ enthält einschließlich seiner Unterordner mehr als \(limit) Fotos. Bei dieser Größe kann RAW Viewer spürbar langsamer reagieren. Möchtest du ihn trotzdem hinzufügen?"
+        }
+        let names = oversizedFolders.map { "• \($0.lastPathComponent)" }.joined(separator: "\n")
+        return "Diese Ordner enthalten einschließlich ihrer Unterordner jeweils mehr als \(limit) Fotos:\n\n\(names)\n\nBei dieser Größe kann RAW Viewer spürbar langsamer reagieren. Möchtest du sie trotzdem hinzufügen?"
+    }
+}
+
 struct ViewerCacheStats: Sendable {
     let indexedFileCount: Int
     let analyzedPhotoCount: Int
@@ -26,6 +41,21 @@ struct ViewerCacheStats: Sendable {
     var formattedThumbnailSize: String {
         ByteCountFormatter.string(fromByteCount: thumbnailByteCount, countStyle: .file)
     }
+}
+
+enum PhotoExportPhase: Sendable {
+    case idle
+    case exporting
+    case complete
+}
+
+struct PhotoExportProgress: Sendable {
+    let phase: PhotoExportPhase
+    let total: Int
+    let completed: Int
+    let failed: Int
+
+    static let idle = PhotoExportProgress(phase: .idle, total: 0, completed: 0, failed: 0)
 }
 
 enum ThumbnailPreparationPhase: Sendable {
@@ -69,7 +99,7 @@ final class LibraryStore: ObservableObject {
     @Published var folderChildren: [String: [FolderItem]] = [:]
     @Published var loadingFolders: Set<String> = []
     @Published var photos: [PhotoAsset] = []
-    @Published var selectedPhotoID: PhotoAsset.ID?
+    @Published private(set) var photoSelection = PhotoSelection()
     @Published var viewMode: LibraryViewMode = .grid
     @Published var isScanning = false
     @Published var scanError: String?
@@ -77,7 +107,10 @@ final class LibraryStore: ObservableObject {
     @Published var viewerZoom = 1.0
     @Published var viewerFitsWindow = true
     @Published var isExporting = false
+    @Published private(set) var photoExportProgress = PhotoExportProgress.idle
     @Published var actionError: ViewerActionError?
+    @Published private(set) var isCheckingSourceSize = false
+    @Published var largePhotoSourceWarning: LargePhotoSourceWarning?
     @Published private(set) var isCacheConfigured = false
     @Published private(set) var isConfiguringCache = false
     @Published private(set) var cacheDirectoryURL: URL?
@@ -86,6 +119,7 @@ final class LibraryStore: ObservableObject {
     @Published var searchText = ""
     @Published private(set) var analysesByPhotoID: [PhotoAsset.ID: PhotoAnalysis] = [:]
     @Published private(set) var xmpExportsByPhotoID: [PhotoAsset.ID: XMPExportRecord] = [:]
+    @Published private(set) var rotationEditsByPhotoID: [PhotoAsset.ID: PhotoRotationEdit] = [:]
     @Published private(set) var analysisProgress = PhotoAnalysisProgress.idle
     @Published private(set) var xmpExportProgress = XMPExportProgress.idle
     @Published private(set) var analyzingPhotoID: PhotoAsset.ID?
@@ -95,6 +129,7 @@ final class LibraryStore: ObservableObject {
     let thumbnailService: ThumbnailService
     let thumbnailPreparation = ThumbnailPreparationState()
     private let scanner: PhotoScanner
+    private let folderSizeChecker: PhotoFolderSizeChecker
     private let bookmarkStore: BookmarkStore
     private let folderLocationStore: FolderLocationStore
     private let cacheLocationStore: CacheLocationStore
@@ -104,6 +139,7 @@ final class LibraryStore: ObservableObject {
     private let lmStudioService: LMStudioService
     private let xmpSidecarService: XMPSidecarService
     private var scanTask: Task<Void, Never>?
+    private var sourceSizeCheckTask: Task<Void, Never>?
     private var thumbnailPreparationTask: Task<Void, Never>?
     private var folderTasks: [String: Task<Void, Never>] = [:]
     private var watcher: FolderWatcher?
@@ -114,10 +150,13 @@ final class LibraryStore: ObservableObject {
     private var preparedThumbnailKey: String?
     private var analysisTask: Task<Void, Never>?
     private var xmpExportTask: Task<Void, Never>?
+    private var rotationPersistenceTask: Task<Void, Never>?
+    private var pendingRotationAssets: [PhotoAsset.ID: PhotoAsset] = [:]
     private var didCheckLMStudio = false
 
     init(
         scanner: PhotoScanner = PhotoScanner(),
+        folderSizeChecker: PhotoFolderSizeChecker = PhotoFolderSizeChecker(),
         bookmarkStore: BookmarkStore = BookmarkStore(),
         folderLocationStore: FolderLocationStore = FolderLocationStore(),
         thumbnailService: ThumbnailService = ThumbnailService(),
@@ -129,6 +168,7 @@ final class LibraryStore: ObservableObject {
         xmpSidecarService: XMPSidecarService = XMPSidecarService()
     ) {
         self.scanner = scanner
+        self.folderSizeChecker = folderSizeChecker
         self.bookmarkStore = bookmarkStore
         self.folderLocationStore = folderLocationStore
         self.thumbnailService = thumbnailService
@@ -220,9 +260,44 @@ final class LibraryStore: ObservableObject {
         )
     }
 
+    var selectedPhotoID: PhotoAsset.ID? { photoSelection.primaryID }
+
+    var selectedPhotoIDs: Set<PhotoAsset.ID> { photoSelection.ids }
+
+    var selectedPhotoCount: Int { photoSelection.count }
+
+    var selectedPhotos: [PhotoAsset] {
+        photos.filter { photoSelection.ids.contains($0.id) }
+    }
+
     var selectedPhoto: PhotoAsset? {
         guard let selectedPhotoID else { return nil }
         return photos.first { $0.id == selectedPhotoID }
+    }
+
+    func isPhotoSelected(_ photo: PhotoAsset) -> Bool {
+        selectedPhotoIDs.contains(photo.id)
+    }
+
+    func selectPhoto(_ photo: PhotoAsset, modifiers: PhotoSelectionModifiers = []) {
+        photoSelection.select(photo.id, orderedIDs: visiblePhotos.map(\.id), modifiers: modifiers)
+    }
+
+    func selectAllVisiblePhotos() {
+        photoSelection.selectAll(visiblePhotos.map(\.id))
+    }
+
+    func clearPhotoSelection() {
+        photoSelection.clear()
+    }
+
+    func photosForAction(containing photo: PhotoAsset) -> [PhotoAsset] {
+        guard selectedPhotoIDs.contains(photo.id), !selectedPhotos.isEmpty else { return [photo] }
+        return selectedPhotos
+    }
+
+    func actionPhotoCount(containing photo: PhotoAsset) -> Int {
+        photosForAction(containing: photo).count
     }
 
     var selectedFolderName: String {
@@ -301,11 +376,62 @@ final class LibraryStore: ObservableObject {
     }
 
     func chooseAndAddSources() {
-        addSources(FolderPanelService.chooseFolders())
+        guard !isCheckingSourceSize else { return }
+        checkAndAddSources(FolderPanelService.chooseFolders())
     }
 
-    func addSources(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
+    func checkAndAddSources(_ urls: [URL]) {
+        let newURLs = urls
+            .map(\.standardizedFileURL)
+            .filter { url in !sources.contains(where: { $0.id == url.path }) }
+        guard !newURLs.isEmpty else { return }
+
+        sourceSizeCheckTask?.cancel()
+        isCheckingSourceSize = true
+        let checker = folderSizeChecker
+        sourceSizeCheckTask = Task { @MainActor [weak self] in
+            do {
+                var oversizedFolders: [URL] = []
+                for url in newURLs {
+                    let result = try await checker.check(folderURL: url)
+                    if result.exceedsLimit {
+                        oversizedFolders.append(url)
+                    }
+                }
+                guard let self else { return }
+                isCheckingSourceSize = false
+                if oversizedFolders.isEmpty {
+                    commitSources(newURLs)
+                } else {
+                    largePhotoSourceWarning = LargePhotoSourceWarning(
+                        urls: newURLs,
+                        oversizedFolders: oversizedFolders
+                    )
+                }
+            } catch is CancellationError {
+                self?.isCheckingSourceSize = false
+            } catch {
+                guard let self else { return }
+                isCheckingSourceSize = false
+                actionError = ViewerActionError(
+                    title: "Fotoanzahl konnte nicht geprüft werden",
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    func confirmAddingLargePhotoSources() {
+        guard let warning = largePhotoSourceWarning else { return }
+        largePhotoSourceWarning = nil
+        commitSources(warning.urls)
+    }
+
+    func cancelAddingLargePhotoSources() {
+        largePhotoSourceWarning = nil
+    }
+
+    private func commitSources(_ urls: [URL]) {
         for url in urls {
             let source = bookmarkStore.makeSource(url: url)
             guard !sources.contains(where: { $0.id == source.id }) else { continue }
@@ -330,10 +456,11 @@ final class LibraryStore: ObservableObject {
             !URL(fileURLWithPath: key).isDescendant(of: source.url)
         }
         selectedFolderURL = nil
-        selectedPhotoID = nil
+        photoSelection.clear()
         photos = []
         analysesByPhotoID = [:]
         xmpExportsByPhotoID = [:]
+        rotationEditsByPhotoID = [:]
         viewMode = .grid
         scanTask?.cancel()
         cancelThumbnailPreparation(reset: true)
@@ -347,13 +474,14 @@ final class LibraryStore: ObservableObject {
         xmpExportTask?.cancel()
         guard FileManager.default.fileExists(atPath: url.path) else {
             selectedFolderURL = url
+            photoSelection.clear()
             photos = []
             scanError = "Der Ordner ist derzeit nicht erreichbar."
             return
         }
         selectedFolderURL = url.standardizedFileURL
         folderLocationStore.saveFolder(url)
-        selectedPhotoID = nil
+        photoSelection.clear()
         viewMode = .grid
         cancelThumbnailPreparation(reset: true)
         configureWatcher(for: url)
@@ -392,8 +520,8 @@ final class LibraryStore: ObservableObject {
                 await loadAnalyses(for: photos, in: folderURL)
                 prepareThumbnailsForCurrentGrid(force: true)
                 isScanning = false
-                if let selectedPhotoID, !photos.contains(where: { $0.id == selectedPhotoID }) {
-                    self.selectedPhotoID = nil
+                photoSelection.prune(to: photos.map(\.id))
+                if selectedPhotoID == nil, viewMode == .photo {
                     viewMode = .grid
                 }
                 await updateCacheStatistics()
@@ -450,29 +578,173 @@ final class LibraryStore: ObservableObject {
     }
 
     func openPhoto(_ photo: PhotoAsset) {
-        selectedPhotoID = photo.id
+        if !selectedPhotoIDs.contains(photo.id) {
+            photoSelection.replace(with: photo.id)
+        }
         viewMode = .photo
         viewerFitsWindow = true
         viewerZoom = 1
     }
 
     func revealInFinder(_ photo: PhotoAsset) {
-        selectedPhotoID = photo.id
-        NSWorkspace.shared.activateFileViewerSelecting([photo.primaryURL])
+        let actionPhotos = photosForAction(containing: photo)
+        if !selectedPhotoIDs.contains(photo.id) {
+            photoSelection.replace(with: photo.id)
+        }
+        NSWorkspace.shared.activateFileViewerSelecting(actionPhotos.map(\.primaryURL))
+    }
+
+    func rotation(for photo: PhotoAsset) -> PhotoRotation {
+        rotationEditsByPhotoID[photo.id]?.rotation ?? .none
+    }
+
+    func rotationEdit(for photo: PhotoAsset) -> PhotoRotationEdit? {
+        rotationEditsByPhotoID[photo.id]
+    }
+
+    var canResetSelectedRotation: Bool {
+        selectedPhotos.contains { rotationEditsByPhotoID[$0.id] != nil }
+    }
+
+    var selectedPhotoNeedsXMPSync: Bool {
+        guard let selectedPhoto else { return false }
+        return rotationEditsByPhotoID[selectedPhoto.id]?.isXMPSyncPending == true
+    }
+
+    func rotateSelectedPhotoLeft() {
+        rotate(selectedPhotos, direction: .left)
+    }
+
+    func rotateSelectedPhotoRight() {
+        rotate(selectedPhotos, direction: .right)
+    }
+
+    func rotate(_ photo: PhotoAsset, direction: PhotoRotation) {
+        let actionPhotos = photosForAction(containing: photo)
+        if !selectedPhotoIDs.contains(photo.id) {
+            photoSelection.replace(with: photo.id)
+        }
+        rotate(actionPhotos, direction: direction)
+    }
+
+    func resetRotation(_ photo: PhotoAsset) {
+        let actionPhotos = photosForAction(containing: photo)
+        if !selectedPhotoIDs.contains(photo.id) {
+            photoSelection.replace(with: photo.id)
+        }
+        resetRotation(actionPhotos)
+    }
+
+    func resetSelectedRotation() {
+        resetRotation(selectedPhotos)
+    }
+
+    func retryXMPSync(_ photo: PhotoAsset) {
+        guard var edit = rotationEditsByPhotoID[photo.id], edit.isXMPSyncPending else { return }
+        edit.xmpSyncError = nil
+        edit.updatedAt = Date()
+        rotationEditsByPhotoID[photo.id] = edit
+        queueRotationPersistence(for: photo)
     }
 
     func export(_ photo: PhotoAsset, as format: PhotoExportFormat) {
-        guard !isExporting else { return }
-        selectedPhotoID = photo.id
+        let actionPhotos = photosForAction(containing: photo)
+        if !selectedPhotoIDs.contains(photo.id) {
+            photoSelection.replace(with: photo.id)
+        }
+        beginExport(actionPhotos, as: format)
+    }
+
+    func exportSelectedPhotos(as format: PhotoExportFormat) {
+        beginExport(selectedPhotos, as: format)
+    }
+
+    private func rotate(_ actionPhotos: [PhotoAsset], direction: PhotoRotation) {
+        guard !actionPhotos.isEmpty else { return }
+        for photo in actionPhotos {
+            let current = rotation(for: photo)
+            let next = direction == .left ? current.rotatedLeft() : current.rotatedRight()
+            updateRotationEdit(for: photo, rotation: next)
+        }
+    }
+
+    private func resetRotation(_ actionPhotos: [PhotoAsset]) {
+        for photo in actionPhotos where rotationEditsByPhotoID[photo.id] != nil {
+            updateRotationEdit(for: photo, rotation: .none)
+        }
+    }
+
+    private func beginExport(_ actionPhotos: [PhotoAsset], as format: PhotoExportFormat) {
+        guard !isExporting, !actionPhotos.isEmpty else { return }
         isExporting = true
+        photoExportProgress = PhotoExportProgress(
+            phase: .exporting,
+            total: actionPhotos.count,
+            completed: 0,
+            failed: 0
+        )
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { isExporting = false }
             do {
-                try await exportService.chooseDestinationAndExport(photo, format: format)
+                if actionPhotos.count == 1, let photo = actionPhotos.first {
+                    let didExport = try await exportService.chooseDestinationAndExport(
+                        photo,
+                        format: format,
+                        rotation: rotation(for: photo)
+                    )
+                    photoExportProgress = didExport
+                        ? PhotoExportProgress(phase: .complete, total: 1, completed: 1, failed: 0)
+                        : .idle
+                    return
+                }
+
+                let items = actionPhotos.map {
+                    PhotoExportItem(asset: $0, rotation: rotation(for: $0))
+                }
+                guard let result = try await exportService.chooseDirectoryAndExport(
+                    items,
+                    format: format,
+                    progress: { [weak self] completed, failed in
+                        self?.photoExportProgress = PhotoExportProgress(
+                            phase: .exporting,
+                            total: items.count,
+                            completed: completed,
+                            failed: failed
+                        )
+                    }
+                ) else {
+                    photoExportProgress = .idle
+                    return
+                }
+                photoExportProgress = PhotoExportProgress(
+                    phase: .complete,
+                    total: items.count,
+                    completed: result.exportedCount,
+                    failed: result.failures.count
+                )
+                if !result.failures.isEmpty {
+                    let details = result.failures.prefix(5)
+                        .map { "\($0.filename): \($0.message)" }
+                        .joined(separator: "\n")
+                    let remainder = result.failures.count > 5
+                        ? "\n… und \(result.failures.count - 5) weitere"
+                        : ""
+                    actionError = ViewerActionError(
+                        title: "\(result.exportedCount) von \(items.count) Fotos exportiert",
+                        message: details + remainder
+                    )
+                }
             } catch is CancellationError {
+                photoExportProgress = .idle
                 return
             } catch {
+                photoExportProgress = PhotoExportProgress(
+                    phase: .complete,
+                    total: actionPhotos.count,
+                    completed: 0,
+                    failed: actionPhotos.count
+                )
                 actionError = ViewerActionError(title: "Export fehlgeschlagen", message: error.localizedDescription)
             }
         }
@@ -488,7 +760,7 @@ final class LibraryStore: ObservableObject {
         guard let selectedPhotoID,
               let index = visiblePhotos.firstIndex(where: { $0.id == selectedPhotoID }),
               index > 0 else { return }
-        self.selectedPhotoID = visiblePhotos[index - 1].id
+        photoSelection.replace(with: visiblePhotos[index - 1].id)
         viewerFitsWindow = true
         viewerZoom = 1
     }
@@ -497,7 +769,7 @@ final class LibraryStore: ObservableObject {
         guard let selectedPhotoID,
               let index = visiblePhotos.firstIndex(where: { $0.id == selectedPhotoID }),
               index + 1 < visiblePhotos.count else { return }
-        self.selectedPhotoID = visiblePhotos[index + 1].id
+        photoSelection.replace(with: visiblePhotos[index + 1].id)
         viewerFitsWindow = true
         viewerZoom = 1
     }
@@ -523,6 +795,16 @@ final class LibraryStore: ObservableObject {
 
     func renderImage(url: URL, isRAW: Bool, maxPixelSize: Int) async throws -> RenderedImage {
         try await fullImageService.render(url: url, isRAW: isRAW, maxPixelSize: maxPixelSize)
+    }
+
+    func thumbnailPreview(for asset: PhotoAsset) async -> RenderedImage? {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        guard let image = await thumbnailService.thumbnail(
+            for: asset,
+            requestedPixelSize: 512,
+            scale: scale
+        ), let pixelSize = ThumbnailService.pixelSize(of: image) else { return nil }
+        return RenderedImage(image: image, pixelSize: pixelSize)
     }
 
     func prepareThumbnails(tileSize: Double, force: Bool = false) {
@@ -751,8 +1033,8 @@ final class LibraryStore: ObservableObject {
                 await loadAnalyses(for: photos, in: folderURL)
                 prepareThumbnailsForCurrentGrid(force: true)
                 isScanning = false
-                if let selectedPhotoID, !photos.contains(where: { $0.id == selectedPhotoID }) {
-                    self.selectedPhotoID = nil
+                photoSelection.prune(to: photos.map(\.id))
+                if selectedPhotoID == nil, viewMode == .photo {
                     viewMode = .grid
                 }
                 await updateCacheStatistics()
@@ -795,7 +1077,7 @@ final class LibraryStore: ObservableObject {
         watchedPath = nil
         try await catalog.configure(cacheDirectory: url)
         let hasSavedLimit = UserDefaults.standard.object(forKey: PreferenceKeys.cacheSizeLimitGB) != nil
-        let limit = hasSavedLimit ? UserDefaults.standard.integer(forKey: PreferenceKeys.cacheSizeLimitGB) : 8
+        let limit = hasSavedLimit ? UserDefaults.standard.integer(forKey: PreferenceKeys.cacheSizeLimitGB) : 20
         try await thumbnailService.configure(cacheDirectory: url, sizeLimitGB: limit)
         if persist { cacheLocationStore.save(url) }
         cacheDirectoryURL = url.standardizedFileURL
@@ -1104,9 +1386,137 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    private func updateRotationEdit(for photo: PhotoAsset, rotation: PhotoRotation) {
+        let supportsXMP = xmpSidecarService.sidecarURL(for: photo) != nil
+        var edit = rotationEditsByPhotoID[photo.id] ?? PhotoRotationEdit(
+            photoID: photo.id,
+            sourcePath: photo.primaryURL.standardizedFileURL.path,
+            rotation: .none,
+            originalXMPOrientation: nil,
+            isOriginalXMPOrientationKnown: !supportsXMP,
+            isXMPSyncPending: supportsXMP,
+            xmpSyncError: nil,
+            updatedAt: Date()
+        )
+        edit.rotation = rotation
+        edit.isXMPSyncPending = supportsXMP
+        edit.xmpSyncError = nil
+        edit.updatedAt = Date()
+        rotationEditsByPhotoID[photo.id] = edit
+        queueRotationPersistence(for: photo)
+    }
+
+    private func queueRotationPersistence(for photo: PhotoAsset) {
+        pendingRotationAssets[photo.id] = photo
+        guard rotationPersistenceTask == nil else { return }
+        rotationPersistenceTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !pendingRotationAssets.isEmpty, !Task.isCancelled {
+                guard let (photoID, photo) = pendingRotationAssets.first else { break }
+                pendingRotationAssets.removeValue(forKey: photoID)
+                await persistRotationEdit(for: photo)
+            }
+            rotationPersistenceTask = nil
+            if !pendingRotationAssets.isEmpty {
+                queueRotationPersistence(for: pendingRotationAssets.first!.value)
+            }
+        }
+    }
+
+    private func persistRotationEdit(for photo: PhotoAsset) async {
+        guard var edit = rotationEditsByPhotoID[photo.id] else { return }
+        let editTimestamp = edit.updatedAt
+        do {
+            try await catalog.saveRotationEdit(edit)
+        } catch {
+            actionError = ViewerActionError(
+                title: "Drehung konnte nicht gespeichert werden",
+                message: error.localizedDescription
+            )
+            return
+        }
+
+        guard xmpSidecarService.sidecarURL(for: photo) != nil else {
+            guard rotationEditsByPhotoID[photo.id]?.updatedAt == editTimestamp else { return }
+            if edit.rotation == .none {
+                try? await catalog.deleteRotationEdit(photoID: photo.id)
+                rotationEditsByPhotoID.removeValue(forKey: photo.id)
+            } else {
+                edit.isXMPSyncPending = false
+                edit.xmpSyncError = nil
+                rotationEditsByPhotoID[photo.id] = edit
+                try? await catalog.saveRotationEdit(edit)
+            }
+            return
+        }
+
+        if !edit.isOriginalXMPOrientationKnown {
+            do {
+                let service = xmpSidecarService
+                let originalOrientation = try await Task.detached(priority: .utility) {
+                    try service.orientation(for: photo)
+                }.value
+                edit.originalXMPOrientation = originalOrientation
+                edit.isOriginalXMPOrientationKnown = true
+                try await catalog.saveRotationEdit(edit)
+                if rotationEditsByPhotoID[photo.id]?.updatedAt == editTimestamp {
+                    rotationEditsByPhotoID[photo.id] = edit
+                }
+            } catch {
+                await recordXMPSyncFailure(error, edit: edit, timestamp: editTimestamp)
+                return
+            }
+        }
+
+        let desiredOrientation: Int?
+        if edit.rotation == .none {
+            desiredOrientation = edit.originalXMPOrientation
+        } else {
+            let sourceOrientation = photo.rawURL.map(ImageMetadataReader.orientation(at:)) ?? 1
+            desiredOrientation = edit.rotation.applying(toTIFFOrientation: sourceOrientation)
+        }
+
+        do {
+            let service = xmpSidecarService
+            _ = try await Task.detached(priority: .utility) {
+                try service.writeOrientation(desiredOrientation, for: photo)
+            }.value
+            guard rotationEditsByPhotoID[photo.id]?.updatedAt == editTimestamp else { return }
+            if edit.rotation == .none {
+                try await catalog.deleteRotationEdit(photoID: photo.id)
+                rotationEditsByPhotoID.removeValue(forKey: photo.id)
+            } else {
+                edit.isXMPSyncPending = false
+                edit.xmpSyncError = nil
+                rotationEditsByPhotoID[photo.id] = edit
+                try await catalog.saveRotationEdit(edit)
+            }
+        } catch {
+            await recordXMPSyncFailure(error, edit: edit, timestamp: editTimestamp)
+        }
+    }
+
+    private func recordXMPSyncFailure(
+        _ error: Error,
+        edit: PhotoRotationEdit,
+        timestamp: Date
+    ) async {
+        var failedEdit = edit
+        failedEdit.isXMPSyncPending = true
+        failedEdit.xmpSyncError = error.localizedDescription
+        try? await catalog.saveRotationEdit(failedEdit)
+        guard rotationEditsByPhotoID[edit.photoID]?.updatedAt == timestamp else { return }
+        rotationEditsByPhotoID[edit.photoID] = failedEdit
+        actionError = ViewerActionError(
+            title: "Drehung gespeichert, XMP nicht synchronisiert",
+            message: "Die Anzeige bleibt korrigiert. Du kannst den XMP-Abgleich im Kontextmenü erneut versuchen.\n\n\(error.localizedDescription)"
+        )
+    }
+
     private func loadAnalyses(for assets: [PhotoAsset], in folderURL: URL) async {
         let stored = (try? await catalog.analyses(in: folderURL)) ?? []
         let storedExports = (try? await catalog.xmpExports(in: folderURL)) ?? []
+        let storedRotations = (try? await catalog.rotationEdits(in: folderURL)) ?? []
         let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
         analysesByPhotoID = Dictionary(uniqueKeysWithValues: stored.compactMap { analysis in
             guard let asset = assetsByID[analysis.photoID], analysis.matches(asset) else { return nil }
@@ -1115,6 +1525,10 @@ final class LibraryStore: ObservableObject {
         xmpExportsByPhotoID = Dictionary(uniqueKeysWithValues: storedExports.compactMap { record in
             guard assetsByID[record.photoID] != nil else { return nil }
             return (record.photoID, record)
+        })
+        rotationEditsByPhotoID = Dictionary(uniqueKeysWithValues: storedRotations.compactMap { edit in
+            guard assetsByID[edit.photoID] != nil else { return nil }
+            return (edit.photoID, edit)
         })
     }
 

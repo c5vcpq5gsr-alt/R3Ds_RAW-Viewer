@@ -89,6 +89,15 @@ struct PhotoMetadata: Equatable, Sendable {
 }
 
 enum ImageMetadataReader {
+    static func displayAspectRatio(pixelWidth: Int, pixelHeight: Int, orientation: Int?) -> Double {
+        guard pixelWidth > 0, pixelHeight > 0 else { return 1 }
+        let swapsAxes = orientation.map { (5...8).contains($0) } ?? false
+        if swapsAxes {
+            return Double(pixelHeight) / Double(pixelWidth)
+        }
+        return Double(pixelWidth) / Double(pixelHeight)
+    }
+
     static func captureDate(at url: URL) -> Date? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [
             kCGImageSourceShouldCache: false
@@ -107,6 +116,17 @@ enum ImageMetadataReader {
             return date
         }
         return nil
+    }
+
+    static func orientation(at url: URL) -> Int {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [
+            kCGImageSourceShouldCache: false
+        ] as CFDictionary),
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+        let orientation = integer(properties[kCGImagePropertyOrientation]),
+        (1...8).contains(orientation)
+        else { return 1 }
+        return orientation
     }
 
     static func metadata(for asset: PhotoAsset) -> PhotoMetadata {

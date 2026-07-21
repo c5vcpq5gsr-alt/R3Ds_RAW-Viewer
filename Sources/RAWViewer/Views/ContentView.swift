@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var store: LibraryStore
+    @AppStorage(PreferenceKeys.collectionLayout) private var collectionLayout = PhotoCollectionLayout.grid
 
     var body: some View {
         Group {
@@ -25,6 +26,18 @@ struct ContentView: View {
                 dismissButton: .default(Text("OK"))
             )
         }
+        .alert(item: $store.largePhotoSourceWarning) { warning in
+            Alert(
+                title: Text("Sehr großer Fotoordner"),
+                message: Text(warning.message),
+                primaryButton: .default(Text("Trotzdem hinzufügen")) {
+                    store.confirmAddingLargePhotoSources()
+                },
+                secondaryButton: .cancel(Text("Abbrechen")) {
+                    store.cancelAddingLargePhotoSources()
+                }
+            )
+        }
     }
 
     private var libraryView: some View {
@@ -41,7 +54,14 @@ struct ContentView: View {
                 } label: {
                     Label("Fotoordner hinzufügen", systemImage: "folder.badge.plus")
                 }
+                .disabled(store.isCheckingSourceSize)
                 .help("Fotoordner hinzufügen (⌘O)")
+
+                if store.isCheckingSourceSize {
+                    ProgressView()
+                        .controlSize(.small)
+                        .help("Fotoanzahl einschließlich Unterordnern wird geprüft")
+                }
 
                 Button {
                     store.refresh()
@@ -51,16 +71,7 @@ struct ContentView: View {
                 .disabled(store.selectedFolderURL == nil || store.isScanning)
                 .help("Ausgewählten Ordner neu einlesen (⌘R)")
 
-            }
-
-            if store.viewMode == .photo {
-                ToolbarItemGroup(placement: .principal) {
-                    Button(action: store.closePhoto) {
-                        Image(systemName: "square.grid.2x2")
-                    }
-                    .keyboardShortcut(.escape, modifiers: [])
-                    .help("Zurück zum Grid (Esc)")
-
+                if store.viewMode == .photo {
                     Button(action: store.showPreviousPhoto) {
                         Image(systemName: "chevron.left")
                     }
@@ -75,8 +86,64 @@ struct ContentView: View {
                     .disabled(!store.canShowNext)
                     .help("Nächstes Foto (→)")
                 }
+            }
 
+            if store.selectedFolderURL != nil {
+                ToolbarItem(placement: .principal) {
+                    Picker("Ansicht", selection: toolbarViewSelection) {
+                        Label("Raster", systemImage: "square.grid.3x3")
+                            .labelStyle(.iconOnly)
+                            .tag(ToolbarViewSelection.grid)
+                            .accessibilityLabel("Rasteransicht")
+                        Label("Blocksatz", systemImage: "rectangle.split.3x1")
+                            .labelStyle(.iconOnly)
+                            .tag(ToolbarViewSelection.justified)
+                            .accessibilityLabel("Blocksatzansicht")
+                        Label("Einzelbild", systemImage: "photo")
+                            .labelStyle(.iconOnly)
+                            .tag(ToolbarViewSelection.photo)
+                            .accessibilityLabel("Einzelbildansicht")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 120)
+                    .help("Raster, Blocksatz oder ausgewähltes Einzelbild anzeigen")
+                }
+            }
+
+            if store.selectedPhotoCount > 0 {
                 ToolbarItemGroup(placement: .primaryAction) {
+                    Button(action: store.rotateSelectedPhotoLeft) {
+                        Image(systemName: "rotate.left")
+                    }
+                    .accessibilityLabel("Nach links drehen")
+                    .help(rotationHelp(direction: "links", shortcut: "⌥⌘←"))
+
+                    Button(action: store.rotateSelectedPhotoRight) {
+                        Image(systemName: "rotate.right")
+                    }
+                    .accessibilityLabel("Nach rechts drehen")
+                    .help(rotationHelp(direction: "rechts", shortcut: "⌥⌘→"))
+
+                    Menu {
+                        ForEach(PhotoExportFormat.allCases, id: \.self) { format in
+                            Button(format.title + " …") {
+                                store.exportSelectedPhotos(as: format)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .accessibilityLabel("Ausgewählte Fotos exportieren")
+                    .help(store.selectedPhotoCount == 1
+                        ? "Ausgewähltes Foto exportieren"
+                        : "\(store.selectedPhotoCount) ausgewählte Fotos exportieren")
+                    .disabled(store.isExporting)
+                }
+            }
+
+            if store.viewMode == .photo {
+                ToolbarItemGroup(placement: .primaryAction) {
+
                     Button("Einpassen", action: store.fitImage)
                         .help("In Fenster einpassen (⌘0)")
                     Button("100 %", action: store.actualSize)
@@ -108,6 +175,41 @@ struct ContentView: View {
             }
         }
     }
+
+    private func rotationHelp(direction: String, shortcut: String) -> String {
+        if store.selectedPhotoCount == 1 {
+            return "Nach \(direction) drehen (\(shortcut))"
+        }
+        return "\(store.selectedPhotoCount) Fotos nach \(direction) drehen (\(shortcut))"
+    }
+
+    private var toolbarViewSelection: Binding<ToolbarViewSelection> {
+        Binding(
+            get: {
+                if store.viewMode == .photo { return .photo }
+                return collectionLayout == .grid ? .grid : .justified
+            },
+            set: { selection in
+                switch selection {
+                case .grid:
+                    collectionLayout = .grid
+                    if store.viewMode == .photo { store.closePhoto() }
+                case .justified:
+                    collectionLayout = .justified
+                    if store.viewMode == .photo { store.closePhoto() }
+                case .photo:
+                    guard let photo = store.selectedPhoto else { return }
+                    store.openPhoto(photo)
+                }
+            }
+        )
+    }
+}
+
+private enum ToolbarViewSelection: Hashable {
+    case grid
+    case justified
+    case photo
 }
 
 private struct CacheSetupView: View {
