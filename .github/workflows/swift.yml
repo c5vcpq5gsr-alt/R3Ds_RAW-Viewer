@@ -1,0 +1,35 @@
+name: Swift CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swift-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build, test, and verify
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show Swift and Xcode versions
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Build app and run tests
+        run: ./script/build_and_run.sh --test
+
+      - name: Verify app bundle signature
+        run: codesign --verify --deep --strict --verbose=2 'dist/RAW Viewer.app'
