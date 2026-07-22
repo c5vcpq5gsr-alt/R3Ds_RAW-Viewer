@@ -122,6 +122,34 @@ Swift 6.3.3 and the macOS 26.5 SDK.
 
 The generated app bundle is written to `dist/RAW Viewer.app`.
 
+## Zertifiziertes macOS-Release
+
+Offizielle Releases werden lokal mit der Developer ID signiert, von Apple
+notarisiert, mit dem Notarisierungsticket versehen und erst nach den unabhängigen
+Signatur-, Gatekeeper- und Archivprüfungen veröffentlicht. Zertifikat und
+Notarisierungszugang bleiben im macOS-Schlüsselbund; GitHub erhält keine Apple-Secrets.
+
+Voraussetzungen:
+
+- eine gültige `Developer ID Application`-Identität im Schlüsselbund
+- das gültige `notarytool`-Schlüsselbundprofil `RAW-Viewer-notary`
+
+Release lokal erstellen:
+
+```sh
+./script/release.sh 0.6.1
+```
+
+Veröffentlichung zunächst ohne Änderungen an Git oder GitHub prüfen:
+
+```sh
+./script/publish_release.sh --dry-run 0.6.1
+```
+
+Danach veröffentlicht derselbe Befehl ohne `--dry-run` den bereits geprüften
+ZIP-Download als Tag und GitHub-Release. Das fertige Archiv liegt unter
+`dist/RAW-Viewer-<Version>-macOS-arm64.zip`.
+
 ## Lizenz
 
 RAW Viewer wird unter der [MIT-Lizenz](LICENSE) veröffentlicht.

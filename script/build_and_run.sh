@@ -10,6 +10,9 @@ APP_NAME="RAW Viewer"
 PROCESS_NAME="RAWViewer"
 BUNDLE_ID="de.r3d.rawviewer"
 MIN_SYSTEM_VERSION="15.0"
+APP_VERSION="0.6.1"
+BUILD_NUMBER="11"
+SIGNING_IDENTITY="${RAW_VIEWER_SIGNING_IDENTITY:--}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -82,9 +85,9 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.6.0</string>
+  <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>10</string>
+  <string>$BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSHighResolutionCapable</key>
@@ -95,7 +98,11 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP_BUNDLE"
+if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+  codesign --force --sign - "$APP_BUNDLE"
+else
+  codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp "$APP_BUNDLE"
+fi
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
