@@ -291,6 +291,15 @@ final class LibraryStore: ObservableObject {
         photoSelection.clear()
     }
 
+    func handleEscapeKey() {
+        switch viewMode.escapeKeyAction {
+        case .clearSelection:
+            clearPhotoSelection()
+        case .closePhoto:
+            closePhoto()
+        }
+    }
+
     func photosForAction(containing photo: PhotoAsset) -> [PhotoAsset] {
         guard selectedPhotoIDs.contains(photo.id), !selectedPhotos.isEmpty else { return [photo] }
         return selectedPhotos

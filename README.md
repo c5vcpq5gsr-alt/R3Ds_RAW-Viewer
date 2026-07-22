@@ -137,13 +137,13 @@ Voraussetzungen:
 Release lokal erstellen:
 
 ```sh
-./script/release.sh 0.6.1
+./script/release.sh 0.6.2
 ```
 
 Veröffentlichung zunächst ohne Änderungen an Git oder GitHub prüfen:
 
 ```sh
-./script/publish_release.sh --dry-run 0.6.1
+./script/publish_release.sh --dry-run 0.6.2
 ```
 
 Danach veröffentlicht derselbe Befehl ohne `--dry-run` den bereits geprüften

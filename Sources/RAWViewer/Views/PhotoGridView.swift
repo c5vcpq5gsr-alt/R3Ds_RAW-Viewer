@@ -43,7 +43,11 @@ struct PhotoGridView: View {
             await rebuildJustifiedRows()
         }
         .background {
-            FirstResponderBridge(requestToken: focusRequestToken, handleKeyDown: handleKeyDown)
+            FirstResponderBridge(
+                requestToken: focusRequestToken,
+                isEnabled: store.viewMode == .grid,
+                handleKeyDown: handleKeyDown
+            )
                 .frame(width: 0, height: 0)
         }
         .searchable(text: $store.searchText, prompt: "Dateiname oder Schlagwort")
@@ -305,8 +309,10 @@ struct PhotoGridView: View {
     }
 
     private func restoreKeyboardFocus() {
+        guard store.viewMode == .grid else { return }
         Task { @MainActor in
             await Task.yield()
+            guard store.viewMode == .grid else { return }
             focusRequestToken &+= 1
         }
     }
@@ -321,12 +327,13 @@ struct PhotoGridView: View {
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        if event.keyCode == 0, modifiers == .command {
-            store.selectAllVisiblePhotos()
+        if event.keyCode == 53, modifiers.isEmpty {
+            store.handleEscapeKey()
             return true
         }
-        if event.keyCode == 53, modifiers.isEmpty {
-            store.clearPhotoSelection()
+        guard store.viewMode == .grid else { return false }
+        if event.keyCode == 0, modifiers == .command {
+            store.selectAllVisiblePhotos()
             return true
         }
         return false

@@ -88,6 +88,7 @@ struct PhotoDetailView: View {
         .background {
             FirstResponderBridge(
                 requestToken: focusRequestToken,
+                isEnabled: store.viewMode == .photo,
                 handleKeyDown: handleKeyDown
             )
             .frame(width: 0, height: 0)
@@ -115,7 +116,7 @@ struct PhotoDetailView: View {
         guard modifiers.isEmpty else { return false }
         switch event.keyCode {
         case 53:
-            store.closePhoto()
+            store.handleEscapeKey()
         case 123:
             store.showPreviousPhoto()
         case 124:
@@ -127,8 +128,10 @@ struct PhotoDetailView: View {
     }
 
     private func requestKeyboardFocus() {
+        guard store.viewMode == .photo else { return }
         Task { @MainActor in
             await Task.yield()
+            guard store.viewMode == .photo else { return }
             focusRequestToken &+= 1
         }
     }

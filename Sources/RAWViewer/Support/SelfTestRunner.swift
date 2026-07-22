@@ -18,6 +18,7 @@ enum SelfTestRunner {
             ("Versteckte Ordner und Pakete", checkSkippedDirectories),
             ("Stabile IDs", checkStableIDs),
             ("Sortierungen", checkSorting),
+            ("ESC-Navigation", checkEscapeNavigation),
             ("Mehrfachauswahl und Batch-Exportziele", checkMultiSelectionAndBatchDestinations),
             ("Blocksatz-Layout", checkJustifiedLayout),
             ("Letzter geöffneter Ordner", checkLastSelectedFolder),
@@ -140,6 +141,17 @@ enum SelfTestRunner {
         try require(PhotoSortOrder.oldestFirst.sort(input).map(\.filename) == ["B.jpg", "A.jpg", "C.jpg"], "Älteste-Sortierung falsch")
         try require(PhotoSortOrder.filenameAscending.sort(input).map(\.filename) == ["A.jpg", "B.jpg", "C.jpg"], "A–Z-Sortierung falsch")
         try require(PhotoSortOrder.filenameDescending.sort(input).map(\.filename) == ["C.jpg", "B.jpg", "A.jpg"], "Z–A-Sortierung falsch")
+    }
+
+    private static func checkEscapeNavigation() async throws {
+        try require(
+            LibraryViewMode.photo.escapeKeyAction == .closePhoto,
+            "ESC schließt die Einzelbildansicht nicht"
+        )
+        try require(
+            LibraryViewMode.grid.escapeKeyAction == .clearSelection,
+            "ESC hebt die Galerieauswahl nicht auf"
+        )
     }
 
     private static func checkMultiSelectionAndBatchDestinations() async throws {

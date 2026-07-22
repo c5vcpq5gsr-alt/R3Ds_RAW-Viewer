@@ -40,6 +40,18 @@ struct PhotoAsset: Identifiable, Hashable, Sendable {
 enum LibraryViewMode: Sendable {
     case grid
     case photo
+
+    var escapeKeyAction: LibraryEscapeKeyAction {
+        switch self {
+        case .grid: .clearSelection
+        case .photo: .closePhoto
+        }
+    }
+}
+
+enum LibraryEscapeKeyAction: Equatable, Sendable {
+    case clearSelection
+    case closePhoto
 }
 
 enum PhotoCollectionLayout: String, CaseIterable, Identifiable, Sendable {

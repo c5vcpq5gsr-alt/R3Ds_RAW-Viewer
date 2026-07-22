@@ -6,7 +6,7 @@ usage() {
 Usage: ./script/release.sh VERSION
 
 Build, Developer ID sign, notarize, staple, package, and verify a local release.
-VERSION must use the form X.Y.Z, for example 0.6.1.
+VERSION must use the form X.Y.Z, for example 0.6.2.
 
 Optional environment overrides:
   MACOS_SIGNING_IDENTITY  Developer ID Application identity

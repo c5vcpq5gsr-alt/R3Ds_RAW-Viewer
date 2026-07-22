@@ -3,6 +3,7 @@ import SwiftUI
 
 struct FirstResponderBridge: NSViewRepresentable {
     let requestToken: Int
+    var isEnabled = true
     var handleKeyDown: (NSEvent) -> Bool = { _ in false }
 
     func makeCoordinator() -> Coordinator {
@@ -11,16 +12,21 @@ struct FirstResponderBridge: NSViewRepresentable {
 
     func makeNSView(context: Context) -> FocusView {
         let view = FocusView()
+        view.isKeyboardFocusEnabled = isEnabled
         view.handleKeyDown = handleKeyDown
         return view
     }
 
     func updateNSView(_ view: FocusView, context: Context) {
+        view.isKeyboardFocusEnabled = isEnabled
         view.handleKeyDown = handleKeyDown
+        guard isEnabled else { return }
         guard context.coordinator.lastRequestToken != requestToken else { return }
         context.coordinator.lastRequestToken = requestToken
         DispatchQueue.main.async { [weak view] in
-            guard let view, let window = view.window else { return }
+            guard let view,
+                  view.isKeyboardFocusEnabled,
+                  let window = view.window else { return }
             window.makeFirstResponder(view)
         }
     }
@@ -30,9 +36,10 @@ struct FirstResponderBridge: NSViewRepresentable {
     }
 
     final class FocusView: NSView {
+        var isKeyboardFocusEnabled = true
         var handleKeyDown: (NSEvent) -> Bool = { _ in false }
 
-        override var acceptsFirstResponder: Bool { true }
+        override var acceptsFirstResponder: Bool { isKeyboardFocusEnabled }
 
         override func keyDown(with event: NSEvent) {
             if !handleKeyDown(event) {
